@@ -2,6 +2,8 @@
 
 A webcam toy that puts physics-driven eyeballs into your eye sockets. They roll around with gravity and head motion, and disappear when you blink.
 
+![Demo](assets/demo.gif)
+
 ## How it works
 
 1. The webcam feeds [MediaPipe Face Landmarker](https://developers.google.com/mediapipe/solutions/vision/face_landmarker), which returns 478 landmarks per face every frame.
