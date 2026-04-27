@@ -16,6 +16,7 @@ interface VisualParams {
   rotation: number; // degrees, clockwise
   imageScale: number; // 1 = auto-fit (contain); >1 zooms in
   mirror: boolean;
+  showDebug: boolean;
 }
 
 interface ViewTransform {
@@ -39,6 +40,7 @@ const DEFAULT_VISUAL_PARAMS: VisualParams = {
   rotation: 0,
   imageScale: 1,
   mirror: true,
+  showDebug: false,
 };
 const DEFAULT_MIN_FACE_WIDTH = 60;
 
@@ -222,6 +224,7 @@ async function main() {
     step: 0.05,
     label: "bg grayscale",
   });
+  vis.addBinding(visualParams, "showDebug", { label: "debug overlay" });
 
   const trk = pane.addFolder({ title: "tracking" });
   trk.addBinding(tracker, "minFaceWidth", {
@@ -461,12 +464,49 @@ async function main() {
       for (const f of faces) {
         f.person.draw(eyeRenderer);
       }
+
+      if (visualParams.showDebug) {
+        drawDebugOverlay(ctx, faces);
+      }
     }
 
     requestAnimationFrame(loop);
   }
 
   requestAnimationFrame(loop);
+}
+
+function drawDebugOverlay(ctx: CanvasRenderingContext2D, faces: TrackedFace[]) {
+  ctx.save();
+  for (const f of faces) {
+    let minX = Infinity,
+      minY = Infinity,
+      maxX = -Infinity,
+      maxY = -Infinity;
+    for (const p of f.landmarks) {
+      if (p.x < minX) minX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y > maxY) maxY = p.y;
+    }
+
+    ctx.fillStyle = "rgba(0, 255, 120, 0.85)";
+    for (const p of f.landmarks) {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 1.2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.strokeStyle = "rgba(255, 80, 200, 0.9)";
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
+
+    ctx.fillStyle = "rgba(255, 80, 200, 0.9)";
+    ctx.font = "11px monospace";
+    ctx.textBaseline = "bottom";
+    ctx.fillText(`#${f.id}`, minX, minY - 2);
+  }
+  ctx.restore();
 }
 
 function traceFaceOval(ctx: CanvasRenderingContext2D, pts: Point[]) {
