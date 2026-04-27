@@ -25,6 +25,8 @@ interface ViewTransform {
   scale: number; // total source→canvas scale (auto-fit × user)
   vW: number; // source video width
   vH: number;
+  rotW: number; // rotated-frame width
+  rotH: number; // rotated-frame height
   cW: number; // canvas width
   cH: number;
   mirror: number; // -1 or 1
@@ -353,21 +355,19 @@ async function main() {
       scale,
       vW,
       vH,
+      rotW,
+      rotH,
       cW,
       cH,
       mirror: visualParams.mirror ? -1 : 1,
     };
   }
 
-  function pointToCanvas(srcX: number, srcY: number, t: ViewTransform): Point {
-    let x = srcX - t.vW / 2;
-    let y = srcY - t.vH / 2;
-    x *= t.mirror;
-    const rx = x * t.cos - y * t.sin;
-    const ry = x * t.sin + y * t.cos;
+  // Maps a point in the rotated-detector-canvas frame to the display canvas.
+  function pointToCanvas(rotX: number, rotY: number, t: ViewTransform): Point {
     return {
-      x: rx * t.scale + t.cW / 2,
-      y: ry * t.scale + t.cH / 2,
+      x: (rotX - t.rotW / 2) * t.scale + t.cW / 2,
+      y: (rotY - t.rotH / 2) * t.scale + t.cH / 2,
     };
   }
 
@@ -377,6 +377,26 @@ async function main() {
     c.rotate(t.rad);
     c.scale(t.mirror, 1);
     c.translate(-t.vW / 2, -t.vH / 2);
+  }
+
+  // Offscreen canvas holding the rotated+mirrored video frame fed to the
+  // landmarker. Rotating the input lets the network see an upright face when
+  // the user has tilted the view.
+  const detectorCanvas = document.createElement("canvas");
+  const detectorCtx = detectorCanvas.getContext("2d")!;
+
+  function renderDetectorFrame(t: ViewTransform) {
+    const w = Math.max(1, Math.ceil(t.rotW));
+    const h = Math.max(1, Math.ceil(t.rotH));
+    if (detectorCanvas.width !== w) detectorCanvas.width = w;
+    if (detectorCanvas.height !== h) detectorCanvas.height = h;
+    detectorCtx.setTransform(1, 0, 0, 1, 0, 0);
+    detectorCtx.clearRect(0, 0, w, h);
+    detectorCtx.translate(w / 2, h / 2);
+    detectorCtx.rotate(t.rad);
+    detectorCtx.scale(t.mirror, 1);
+    detectorCtx.translate(-t.vW / 2, -t.vH / 2);
+    detectorCtx.drawImage(video, 0, 0);
   }
 
   let lastVideoTime = -1;
@@ -414,13 +434,17 @@ async function main() {
     if (video.currentTime !== lastVideoTime) {
       lastVideoTime = video.currentTime;
 
-      const result = faceLandmarker.detectForVideo(video, performance.now());
+      const t = buildTransform();
+      renderDetectorFrame(t);
+      const result = faceLandmarker.detectForVideo(
+        detectorCanvas,
+        performance.now()
+      );
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      const t = buildTransform();
       const facesPx: Point[][] = result.faceLandmarks.map((lm) =>
-        lm.map((p) => pointToCanvas(p.x * t.vW, p.y * t.vH, t))
+        lm.map((p) => pointToCanvas(p.x * t.rotW, p.y * t.rotH, t))
       );
 
       const faces = tracker.update(facesPx, dt);
