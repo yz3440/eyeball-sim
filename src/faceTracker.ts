@@ -41,22 +41,24 @@ export class FaceTracker {
     this.system = system;
   }
 
-  update(
-    detected: { x: number; y: number }[][],
-    W: number,
-    H: number,
-    dt: number
-  ): TrackedFace[] {
+  /** `detected` must already be in canvas pixel space (mirroring/rotation
+   *  applied by the caller). */
+  update(detected: Point[][], dt: number): TrackedFace[] {
     const faces: Point[][] = [];
-    for (const lm of detected) {
-      const pts: Point[] = lm.map((p) => ({ x: (1 - p.x) * W, y: p.y * H }));
+    for (const pts of detected) {
       let minX = Infinity,
-        maxX = -Infinity;
+        maxX = -Infinity,
+        minY = Infinity,
+        maxY = -Infinity;
       for (const i of FACE_OVAL) {
         if (pts[i].x < minX) minX = pts[i].x;
         if (pts[i].x > maxX) maxX = pts[i].x;
+        if (pts[i].y < minY) minY = pts[i].y;
+        if (pts[i].y > maxY) maxY = pts[i].y;
       }
-      if (maxX - minX >= this.minFaceWidth) faces.push(pts);
+      // Use bbox diagonal so the threshold works regardless of rotation.
+      const diag = Math.hypot(maxX - minX, maxY - minY);
+      if (diag >= this.minFaceWidth) faces.push(pts);
     }
     const centroids = faces.map(faceCentroid);
 

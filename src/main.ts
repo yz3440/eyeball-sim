@@ -9,12 +9,84 @@ import {
 import { FaceTracker, TrackedFace } from "./faceTracker";
 import { FACE_OVAL } from "./landmarks";
 
-const W = 640;
-const H = 480;
-
 interface VisualParams {
   colorOnlyFace: boolean;
   grayscaleStrength: number;
+  rotation: number; // degrees, clockwise
+  imageScale: number; // 1 = auto-fit (contain); >1 zooms in
+  mirror: boolean;
+}
+
+interface ViewTransform {
+  cos: number;
+  sin: number;
+  rad: number;
+  scale: number; // total source→canvas scale (auto-fit × user)
+  vW: number; // source video width
+  vH: number;
+  cW: number; // canvas width
+  cH: number;
+  mirror: number; // -1 or 1
+}
+
+const STORAGE_KEY = "eyeball-sim/settings/v1";
+const DEFAULT_VISUAL_PARAMS: VisualParams = {
+  colorOnlyFace: true,
+  grayscaleStrength: 1,
+  rotation: 0,
+  imageScale: 1,
+  mirror: true,
+};
+const DEFAULT_MIN_FACE_WIDTH = 60;
+
+interface StoredSettings {
+  physics?: Partial<PhysicsParams>;
+  visual?: Partial<VisualParams>;
+  minFaceWidth?: number;
+  deviceId?: string;
+}
+
+function loadSettings(): StoredSettings | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as StoredSettings) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveSettings(
+  physics: PhysicsParams,
+  visual: VisualParams,
+  minFaceWidth: number,
+  deviceId: string | null
+) {
+  try {
+    const data: StoredSettings = {
+      physics: { ...physics },
+      visual: { ...visual },
+      minFaceWidth,
+      ...(deviceId ? { deviceId } : {}),
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  } catch {
+    // localStorage may be unavailable (private mode, quota); ignore.
+  }
+}
+
+async function openCameraStream(
+  deviceId: string | null
+): Promise<MediaStream> {
+  const constraints: MediaStreamConstraints = {
+    video: {
+      width: { ideal: 1280 },
+      height: { ideal: 720 },
+      ...(deviceId
+        ? { deviceId: { exact: deviceId } }
+        : { facingMode: "user" }),
+    },
+  };
+  return navigator.mediaDevices.getUserMedia(constraints);
 }
 
 async function main() {
@@ -23,13 +95,29 @@ async function main() {
   const loading = document.getElementById("loading") as HTMLDivElement;
   const ctx = canvas.getContext("2d")!;
 
-  canvas.width = W;
-  canvas.height = H;
+  function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+  }
+  resize();
+  window.addEventListener("resize", resize);
 
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video: { width: W, height: H, facingMode: "user" },
-  });
-  video.srcObject = stream;
+  const stored = loadSettings();
+  let currentDeviceId: string | null = stored?.deviceId ?? null;
+
+  let currentStream: MediaStream;
+  try {
+    currentStream = await openCameraStream(currentDeviceId);
+  } catch {
+    // Saved device is gone or denied — fall back to any user-facing camera.
+    currentDeviceId = null;
+    currentStream = await openCameraStream(null);
+  }
+  // Lock in the actual deviceId we ended up with.
+  const activeTrack = currentStream.getVideoTracks()[0];
+  if (activeTrack) currentDeviceId = activeTrack.getSettings().deviceId ?? null;
+
+  video.srcObject = currentStream;
   await new Promise<void>((resolve) => {
     video.onloadeddata = () => resolve();
   });
@@ -38,13 +126,16 @@ async function main() {
   loading.style.display = "none";
 
   const physicsParams: PhysicsParams = { ...DEFAULT_PHYSICS_PARAMS };
-  const visualParams: VisualParams = {
-    colorOnlyFace: true,
-    grayscaleStrength: 1,
-  };
+  const visualParams: VisualParams = { ...DEFAULT_VISUAL_PARAMS };
+
+  if (stored?.physics) Object.assign(physicsParams, stored.physics);
+  if (stored?.visual) Object.assign(visualParams, stored.visual);
 
   const system = new EyeballSystem(physicsParams);
   const tracker = new FaceTracker(system);
+  if (typeof stored?.minFaceWidth === "number") {
+    tracker.minFaceWidth = stored.minFaceWidth;
+  }
 
   const pane = new Pane({ title: "controls (tab to hide)" });
   const phys = pane.addFolder({ title: "physics" });
@@ -102,6 +193,21 @@ async function main() {
     label: "fade time",
   });
 
+  const view = pane.addFolder({ title: "view" });
+  view.addBinding(visualParams, "rotation", {
+    min: 0,
+    max: 360,
+    step: 1,
+    label: "rotation°",
+  });
+  view.addBinding(visualParams, "imageScale", {
+    min: 0.2,
+    max: 3,
+    step: 0.05,
+    label: "scale",
+  });
+  view.addBinding(visualParams, "mirror", { label: "mirror" });
+
   const vis = pane.addFolder({ title: "visual" });
   vis.addBinding(visualParams, "colorOnlyFace", { label: "color faces only" });
   vis.addBinding(visualParams, "grayscaleStrength", {
@@ -114,13 +220,76 @@ async function main() {
   const trk = pane.addFolder({ title: "tracking" });
   trk.addBinding(tracker, "minFaceWidth", {
     min: 0,
-    max: 300,
+    max: 600,
     step: 1,
     label: "min face px",
   });
 
+  let switching = false;
+  async function switchCamera() {
+    if (switching) return;
+    switching = true;
+    try {
+      const all = await navigator.mediaDevices.enumerateDevices();
+      const cams = all.filter((d) => d.kind === "videoinput");
+      if (cams.length < 2) return;
+      const idx = Math.max(
+        0,
+        cams.findIndex((d) => d.deviceId === currentDeviceId)
+      );
+      const next = cams[(idx + 1) % cams.length];
+
+      currentStream.getTracks().forEach((t) => t.stop());
+      try {
+        currentStream = await openCameraStream(next.deviceId);
+        currentDeviceId = next.deviceId;
+      } catch {
+        // New device failed; reacquire whatever was working before.
+        currentStream = await openCameraStream(currentDeviceId);
+      }
+      video.srcObject = currentStream;
+      await new Promise<void>((resolve) => {
+        video.onloadeddata = () => resolve();
+      });
+      saveSettings(
+        physicsParams,
+        visualParams,
+        tracker.minFaceWidth,
+        currentDeviceId
+      );
+    } finally {
+      switching = false;
+    }
+  }
+
+  pane.addButton({ title: "switch camera" }).on("click", () => {
+    switchCamera().catch((err) => console.error("switchCamera failed", err));
+  });
+
   pane.addButton({ title: "reset eyeballs" }).on("click", () => {
     tracker.resetAll();
+  });
+
+  pane.addButton({ title: "reset settings to defaults" }).on("click", () => {
+    Object.assign(physicsParams, DEFAULT_PHYSICS_PARAMS);
+    Object.assign(visualParams, DEFAULT_VISUAL_PARAMS);
+    tracker.minFaceWidth = DEFAULT_MIN_FACE_WIDTH;
+    pane.refresh();
+    saveSettings(
+      physicsParams,
+      visualParams,
+      tracker.minFaceWidth,
+      currentDeviceId
+    );
+  });
+
+  pane.on("change", () => {
+    saveSettings(
+      physicsParams,
+      visualParams,
+      tracker.minFaceWidth,
+      currentDeviceId
+    );
   });
 
   window.addEventListener("keydown", (e) => {
@@ -131,30 +300,74 @@ async function main() {
     }
   });
 
+  function buildTransform(): ViewTransform {
+    const rad = (visualParams.rotation * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    const vW = video.videoWidth || 1;
+    const vH = video.videoHeight || 1;
+    const cW = canvas.width;
+    const cH = canvas.height;
+    const rotW = Math.abs(cos) * vW + Math.abs(sin) * vH;
+    const rotH = Math.abs(sin) * vW + Math.abs(cos) * vH;
+    const fit = Math.min(cW / rotW, cH / rotH);
+    const scale = fit * visualParams.imageScale;
+    return {
+      cos,
+      sin,
+      rad,
+      scale,
+      vW,
+      vH,
+      cW,
+      cH,
+      mirror: visualParams.mirror ? -1 : 1,
+    };
+  }
+
+  function pointToCanvas(srcX: number, srcY: number, t: ViewTransform): Point {
+    let x = srcX - t.vW / 2;
+    let y = srcY - t.vH / 2;
+    x *= t.mirror;
+    const rx = x * t.cos - y * t.sin;
+    const ry = x * t.sin + y * t.cos;
+    return {
+      x: rx * t.scale + t.cW / 2,
+      y: ry * t.scale + t.cH / 2,
+    };
+  }
+
+  function applyVideoTransform(c: CanvasRenderingContext2D, t: ViewTransform) {
+    c.translate(t.cW / 2, t.cH / 2);
+    c.scale(t.scale, t.scale);
+    c.rotate(t.rad);
+    c.scale(t.mirror, 1);
+    c.translate(-t.vW / 2, -t.vH / 2);
+  }
+
   let lastVideoTime = -1;
   let lastTime = performance.now();
 
-  function drawBackground(faces: TrackedFace[]) {
+  function drawBackground(faces: TrackedFace[], t: ViewTransform) {
     if (visualParams.colorOnlyFace) {
-      // Grayscale full-frame, then color clipped to each face
       ctx.save();
       ctx.filter = `grayscale(${visualParams.grayscaleStrength})`;
-      ctx.scale(-1, 1);
-      ctx.drawImage(video, -W, 0, W, H);
+      applyVideoTransform(ctx, t);
+      ctx.drawImage(video, 0, 0);
       ctx.restore();
 
       for (const f of faces) {
         ctx.save();
         traceFaceOval(ctx, f.landmarks);
         ctx.clip();
-        ctx.scale(-1, 1);
-        ctx.drawImage(video, -W, 0, W, H);
+        applyVideoTransform(ctx, t);
+        ctx.drawImage(video, 0, 0);
         ctx.restore();
       }
     } else {
       ctx.save();
-      ctx.scale(-1, 1);
-      ctx.drawImage(video, -W, 0, W, H);
+      applyVideoTransform(ctx, t);
+      ctx.drawImage(video, 0, 0);
       ctx.restore();
     }
   }
@@ -169,12 +382,17 @@ async function main() {
 
       const result = faceLandmarker.detectForVideo(video, performance.now());
 
-      ctx.clearRect(0, 0, W, H);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      const faces = tracker.update(result.faceLandmarks, W, H, dt);
+      const t = buildTransform();
+      const facesPx: Point[][] = result.faceLandmarks.map((lm) =>
+        lm.map((p) => pointToCanvas(p.x * t.vW, p.y * t.vH, t))
+      );
+
+      const faces = tracker.update(facesPx, dt);
       system.step(dt);
 
-      drawBackground(faces);
+      drawBackground(faces, t);
 
       for (const f of faces) {
         const { left, right } = f.person.getSmoothedContours();
