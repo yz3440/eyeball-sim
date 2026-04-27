@@ -26,3 +26,9 @@ export const RIGHT_EYE_UPPER_MID = 159;
 export const RIGHT_EYE_LOWER_MID = 145;
 export const LEFT_EYE_UPPER_MID = 386;
 export const LEFT_EYE_LOWER_MID = 374;
+
+// Eye corners — used to compute EAR (vertical / horizontal)
+export const RIGHT_EYE_OUTER = 33;
+export const RIGHT_EYE_INNER = 133;
+export const LEFT_EYE_OUTER = 263;
+export const LEFT_EYE_INNER = 362;

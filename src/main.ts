@@ -1,21 +1,20 @@
 import { Pane } from "tweakpane";
 import { createFaceLandmarker } from "./faceLandmarker";
+import { fillEyesWhite, Point } from "./faceRenderer";
 import {
-  drawFaceMask,
-  drawFaceColor,
-  fillEyesWhite,
-  cutOutEyes,
-  Point,
-} from "./faceRenderer";
-import { PhysicsEyeballs } from "./physicsEyeballs";
+  EyeballSystem,
+  DEFAULT_PHYSICS_PARAMS,
+  PhysicsParams,
+} from "./physicsEyeballs";
+import { FaceTracker, TrackedFace } from "./faceTracker";
 import { FACE_OVAL } from "./landmarks";
 
 const W = 640;
 const H = 480;
-const FACE_FILL = 0.95;
 
-function lerp(a: number, b: number, t: number) {
-  return a + (b - a) * t;
+interface VisualParams {
+  colorOnlyFace: boolean;
+  grayscaleStrength: number;
 }
 
 async function main() {
@@ -38,28 +37,127 @@ async function main() {
   const faceLandmarker = await createFaceLandmarker();
   loading.style.display = "none";
 
-  const physics = new PhysicsEyeballs();
-
-  // Tweakpane
-  const params = {
-    faceColor: "#ffffff",
-    useTexture: true,
+  const physicsParams: PhysicsParams = { ...DEFAULT_PHYSICS_PARAMS };
+  const visualParams: VisualParams = {
+    colorOnlyFace: true,
+    grayscaleStrength: 1,
   };
 
-  const pane = new Pane({ title: "controls" });
-  pane.addButton({ title: "drop eyeballs" }).on("click", () => {
-    physics.dropBalls();
+  const system = new EyeballSystem(physicsParams);
+  const tracker = new FaceTracker(system);
+
+  const pane = new Pane({ title: "controls (tab to hide)" });
+  const phys = pane.addFolder({ title: "physics" });
+  phys.addBinding(physicsParams, "gravity", { min: -30, max: 50, step: 0.5 });
+  phys.addBinding(physicsParams, "linearDamping", {
+    min: 0,
+    max: 10,
+    step: 0.1,
+    label: "damping",
   });
-  pane.addBinding(params, "useTexture", { label: "face texture" });
-  pane.addBinding(params, "faceColor", { label: "face color" });
+  phys.addBinding(physicsParams, "restitution", {
+    min: 0,
+    max: 1,
+    step: 0.05,
+    label: "bounce",
+  });
+  phys.addBinding(physicsParams, "friction", { min: 0, max: 2, step: 0.05 });
+  phys.addBinding(physicsParams, "density", { min: 0.1, max: 5, step: 0.1 });
+  phys.addBinding(physicsParams, "springStrength", {
+    min: 0,
+    max: 200,
+    step: 1,
+    label: "spring",
+  });
+  phys.addBinding(physicsParams, "eyeDrag", {
+    min: 0,
+    max: 1,
+    step: 0.05,
+    label: "eye drag",
+  });
+
+  const eye = pane.addFolder({ title: "eye" });
+  eye.addBinding(physicsParams, "eyeballSizeRatio", {
+    min: 0.1,
+    max: 0.7,
+    step: 0.01,
+    label: "ball size",
+  });
+  eye.addBinding(physicsParams, "landmarkSmooth", {
+    min: 0,
+    max: 1,
+    step: 0.05,
+    label: "smoothing",
+  });
+  eye.addBinding(physicsParams, "earClosedThreshold", {
+    min: 0.05,
+    max: 0.4,
+    step: 0.01,
+    label: "blink threshold",
+  });
+  eye.addBinding(physicsParams, "alphaTimeConstant", {
+    min: 0.01,
+    max: 0.5,
+    step: 0.01,
+    label: "fade time",
+  });
+
+  const vis = pane.addFolder({ title: "visual" });
+  vis.addBinding(visualParams, "colorOnlyFace", { label: "color faces only" });
+  vis.addBinding(visualParams, "grayscaleStrength", {
+    min: 0,
+    max: 1,
+    step: 0.05,
+    label: "bg grayscale",
+  });
+
+  const trk = pane.addFolder({ title: "tracking" });
+  trk.addBinding(tracker, "minFaceWidth", {
+    min: 0,
+    max: 300,
+    step: 1,
+    label: "min face px",
+  });
+
+  pane.addButton({ title: "reset eyeballs" }).on("click", () => {
+    tracker.resetAll();
+  });
+
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Tab") {
+      e.preventDefault();
+      const el = pane.element as HTMLElement;
+      el.style.display = el.style.display === "none" ? "" : "none";
+    }
+  });
 
   let lastVideoTime = -1;
   let lastTime = performance.now();
 
-  let smoothScale = 1;
-  let smoothTx = 0;
-  let smoothTy = 0;
-  const SMOOTH = 0.15;
+  function drawBackground(faces: TrackedFace[]) {
+    if (visualParams.colorOnlyFace) {
+      // Grayscale full-frame, then color clipped to each face
+      ctx.save();
+      ctx.filter = `grayscale(${visualParams.grayscaleStrength})`;
+      ctx.scale(-1, 1);
+      ctx.drawImage(video, -W, 0, W, H);
+      ctx.restore();
+
+      for (const f of faces) {
+        ctx.save();
+        traceFaceOval(ctx, f.landmarks);
+        ctx.clip();
+        ctx.scale(-1, 1);
+        ctx.drawImage(video, -W, 0, W, H);
+        ctx.restore();
+      }
+    } else {
+      ctx.save();
+      ctx.scale(-1, 1);
+      ctx.drawImage(video, -W, 0, W, H);
+      ctx.restore();
+    }
+  }
 
   function loop() {
     const now = performance.now();
@@ -73,61 +171,15 @@ async function main() {
 
       ctx.clearRect(0, 0, W, H);
 
-      if (result.faceLandmarks.length > 0) {
-        const lm = result.faceLandmarks[0];
+      const faces = tracker.update(result.faceLandmarks, W, H, dt);
+      system.step(dt);
 
-        const rawPts: Point[] = lm.map((p) => ({
-          x: (1 - p.x) * W,
-          y: p.y * H,
-        }));
+      drawBackground(faces);
 
-        let minX = Infinity,
-          maxX = -Infinity,
-          minY = Infinity,
-          maxY = -Infinity;
-        for (const i of FACE_OVAL) {
-          minX = Math.min(minX, rawPts[i].x);
-          maxX = Math.max(maxX, rawPts[i].x);
-          minY = Math.min(minY, rawPts[i].y);
-          maxY = Math.max(maxY, rawPts[i].y);
-        }
-        const faceW = maxX - minX;
-        const faceH = maxY - minY;
-        const faceCx = (minX + maxX) / 2;
-        const faceCy = (minY + maxY) / 2;
-
-        const targetScale = Math.min(
-          (W * FACE_FILL) / faceW,
-          (H * FACE_FILL) / faceH
-        );
-        const targetTx = W / 2 - faceCx * targetScale;
-        const targetTy = H / 2 - faceCy * targetScale;
-
-        smoothScale = lerp(smoothScale, targetScale, SMOOTH);
-        smoothTx = lerp(smoothTx, targetTx, SMOOTH);
-        smoothTy = lerp(smoothTy, targetTy, SMOOTH);
-
-        const pts: Point[] = rawPts.map((p) => ({
-          x: p.x * smoothScale + smoothTx,
-          y: p.y * smoothScale + smoothTy,
-        }));
-
-        physics.update(pts, dt);
-        const { left: smoothLeft, right: smoothRight } =
-          physics.getSmoothedContours();
-
-        // Face: texture or solid color
-        if (params.useTexture) {
-          drawFaceMask(ctx, video, pts, W, H, smoothScale, smoothTx, smoothTy);
-        } else {
-          drawFaceColor(ctx, pts, params.faceColor);
-        }
-
-        cutOutEyes(ctx, smoothLeft, smoothRight);
-        fillEyesWhite(ctx, smoothLeft, smoothRight);
-        physics.draw(ctx);
-      } else {
-        physics.noFace();
+      for (const f of faces) {
+        const { left, right } = f.person.getSmoothedContours();
+        fillEyesWhite(ctx, left, right);
+        f.person.draw(ctx);
       }
     }
 
@@ -135,6 +187,17 @@ async function main() {
   }
 
   requestAnimationFrame(loop);
+}
+
+function traceFaceOval(ctx: CanvasRenderingContext2D, pts: Point[]) {
+  ctx.beginPath();
+  const first = pts[FACE_OVAL[0]];
+  ctx.moveTo(first.x, first.y);
+  for (let i = 1; i < FACE_OVAL.length; i++) {
+    const p = pts[FACE_OVAL[i]];
+    ctx.lineTo(p.x, p.y);
+  }
+  ctx.closePath();
 }
 
 main().catch(console.error);

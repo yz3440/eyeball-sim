@@ -11,7 +11,7 @@ export async function createFaceLandmarker(): Promise<FaceLandmarker> {
       delegate: "GPU",
     },
     runningMode: "VIDEO",
-    numFaces: 1,
+    numFaces: 6,
     outputFaceBlendshapes: false,
     outputFacialTransformationMatrixes: false,
   });
