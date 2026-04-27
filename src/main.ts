@@ -8,6 +8,7 @@ import {
 } from "./physicsEyeballs";
 import { FaceTracker, TrackedFace } from "./faceTracker";
 import { FACE_OVAL } from "./landmarks";
+import { GLEyeRenderer } from "./glEyeRenderer";
 
 interface VisualParams {
   colorOnlyFace: boolean;
@@ -92,12 +93,15 @@ async function openCameraStream(
 async function main() {
   const video = document.getElementById("video") as HTMLVideoElement;
   const canvas = document.getElementById("canvas") as HTMLCanvasElement;
+  const glCanvas = document.getElementById("gl") as HTMLCanvasElement;
   const loading = document.getElementById("loading") as HTMLDivElement;
   const ctx = canvas.getContext("2d")!;
+  const eyeRenderer = new GLEyeRenderer(glCanvas);
 
   function resize() {
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
+    eyeRenderer.resize(window.innerWidth, window.innerHeight);
   }
   resize();
   window.addEventListener("resize", resize);
@@ -427,7 +431,11 @@ async function main() {
       for (const f of faces) {
         const { left, right } = f.person.getSmoothedContours();
         fillEyesWhite(ctx, left, right);
-        f.person.draw(ctx);
+      }
+
+      eyeRenderer.beginFrame();
+      for (const f of faces) {
+        f.person.draw(eyeRenderer);
       }
     }
 

@@ -1,5 +1,6 @@
 import * as planck from "planck";
 import { Point } from "./faceRenderer";
+import { GLEyeRenderer } from "./glEyeRenderer";
 import {
   RIGHT_EYE,
   LEFT_EYE,
@@ -436,27 +437,26 @@ export class PersonEyeballs {
     };
   }
 
-  draw(ctx: CanvasRenderingContext2D) {
-    ctx.save();
-    ctx.fillStyle = "black";
-
+  draw(renderer: GLEyeRenderer) {
     if (this.leftAlpha > 0.01) {
       const lp = this.leftBall.getPosition();
-      ctx.globalAlpha = this.leftAlpha;
-      ctx.beginPath();
-      ctx.arc(lp.x * SCALE, lp.y * SCALE, this.leftRadius, 0, Math.PI * 2);
-      ctx.fill();
+      renderer.drawEye({
+        cx: lp.x * SCALE,
+        cy: lp.y * SCALE,
+        radius: this.leftRadius,
+        alpha: this.leftAlpha,
+      });
     }
 
     if (this.rightAlpha > 0.01) {
       const rp = this.rightBall.getPosition();
-      ctx.globalAlpha = this.rightAlpha;
-      ctx.beginPath();
-      ctx.arc(rp.x * SCALE, rp.y * SCALE, this.rightRadius, 0, Math.PI * 2);
-      ctx.fill();
+      renderer.drawEye({
+        cx: rp.x * SCALE,
+        cy: rp.y * SCALE,
+        radius: this.rightRadius,
+        alpha: this.rightAlpha,
+      });
     }
-
-    ctx.restore();
   }
 
   dispose() {

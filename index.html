@@ -26,7 +26,8 @@
         height: 100vh;
         overflow: hidden;
       }
-      canvas { display: block; }
+      canvas { display: block; position: fixed; inset: 0; }
+      #gl { pointer-events: none; }
       video { display: none; }
       #loading {
         position: absolute;
@@ -40,6 +41,7 @@
     <div id="loading">loading...</div>
     <video id="video" autoplay playsinline></video>
     <canvas id="canvas"></canvas>
+    <canvas id="gl"></canvas>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
