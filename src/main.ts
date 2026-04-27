@@ -145,7 +145,7 @@ async function main() {
     tracker.minFaceWidth = stored.minFaceWidth;
   }
 
-  const pane = new Pane({ title: "controls (tab to hide)" });
+  const pane = new Pane({ title: "controls (c to hide)" });
   const phys = pane.addFolder({ title: "physics" });
   phys.addBinding(physicsParams, "gravity", { min: -30, max: 50, step: 0.5 });
   phys.addBinding(physicsParams, "linearDamping", {
@@ -332,7 +332,7 @@ async function main() {
   });
 
   window.addEventListener("keydown", (e) => {
-    if (e.key === "Tab") {
+    if (e.key === "c" || e.key === "C") {
       e.preventDefault();
       const el = pane.element as HTMLElement;
       el.style.display = el.style.display === "none" ? "" : "none";
