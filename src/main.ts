@@ -226,26 +226,19 @@ async function main() {
   });
 
   let switching = false;
-  async function switchCamera() {
-    if (switching) return;
+  async function switchCameraTo(deviceId: string) {
+    if (switching || !deviceId || deviceId === currentDeviceId) return;
     switching = true;
     try {
-      const all = await navigator.mediaDevices.enumerateDevices();
-      const cams = all.filter((d) => d.kind === "videoinput");
-      if (cams.length < 2) return;
-      const idx = Math.max(
-        0,
-        cams.findIndex((d) => d.deviceId === currentDeviceId)
-      );
-      const next = cams[(idx + 1) % cams.length];
-
       currentStream.getTracks().forEach((t) => t.stop());
       try {
-        currentStream = await openCameraStream(next.deviceId);
-        currentDeviceId = next.deviceId;
+        currentStream = await openCameraStream(deviceId);
+        currentDeviceId = deviceId;
       } catch {
         // New device failed; reacquire whatever was working before.
         currentStream = await openCameraStream(currentDeviceId);
+        cameraSel.deviceId = currentDeviceId ?? "";
+        pane.refresh();
       }
       video.srcObject = currentStream;
       await new Promise<void>((resolve) => {
@@ -262,8 +255,45 @@ async function main() {
     }
   }
 
-  pane.addButton({ title: "switch camera" }).on("click", () => {
-    switchCamera().catch((err) => console.error("switchCamera failed", err));
+  const cameraSel = { deviceId: currentDeviceId ?? "" };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let cameraBinding: any = null;
+
+  async function rebuildCameraList() {
+    const devs = await navigator.mediaDevices.enumerateDevices();
+    const cams = devs.filter((d) => d.kind === "videoinput");
+    if (cams.length === 0) return;
+
+    const options: Record<string, string> = {};
+    cams.forEach((c, i) => {
+      const label = c.label || `camera ${i + 1}`;
+      options[label] = c.deviceId;
+    });
+
+    if (!cams.some((c) => c.deviceId === cameraSel.deviceId)) {
+      cameraSel.deviceId = currentDeviceId ?? cams[0].deviceId;
+    }
+
+    if (cameraBinding) cameraBinding.dispose();
+    cameraBinding = view.addBinding(cameraSel, "deviceId", {
+      label: "camera",
+      options,
+      index: 0,
+    });
+    cameraBinding.on("change", (ev: { value: string }) => {
+      switchCameraTo(ev.value).catch((err) =>
+        console.error("switchCameraTo failed", err)
+      );
+    });
+  }
+
+  rebuildCameraList().catch((err) =>
+    console.error("rebuildCameraList failed", err)
+  );
+  navigator.mediaDevices.addEventListener("devicechange", () => {
+    rebuildCameraList().catch((err) =>
+      console.error("rebuildCameraList failed", err)
+    );
   });
 
   pane.addButton({ title: "reset eyeballs" }).on("click", () => {
