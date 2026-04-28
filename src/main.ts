@@ -710,19 +710,32 @@ async function main() {
       const t = buildTransform();
       renderDetectorFrame(t);
 
-      // Each detected face: 478 landmarks in detectorCanvas-pixel coords.
-      const detectedFaces: { x: number; y: number }[][] = [];
+      // First pass: MP on the full scale-aware detector frame. Cheap and
+      // catches multi-face when faces are big enough.
+      let mpResult = await faceLandmarker.detectForVideo(
+        detectorCanvas,
+        performance.now()
+      );
 
-      if (yoloReady) {
-        // YOLO is the primary detector. For each YOLO bbox, render a 1.5x
-        // square padded crop into subCanvas and run MediaPipe on the crop —
-        // small faces fill the frame and MP gets dense pixels.
+      // Default mapping: landmarks come in detectorCanvas-normalized coords.
+      let landmarkToDet = (p: { x: number; y: number }) => ({
+        x: p.x * t.detW,
+        y: p.y * t.detH,
+      });
+
+      // Cold-start fallback: only when MP saw nothing. YOLO finds the bbox,
+      // we crop tightly around it and re-run MP on the crop. Skipping YOLO in
+      // the steady state keeps the M1 inference budget reasonable.
+      if (mpResult.faceLandmarks.length === 0 && yoloReady) {
         const yoloBoxes = await yolo.detect(detectorCanvas).catch(() => []);
-        for (let i = 0; i < yoloBoxes.length; i++) {
-          const b = yoloBoxes[i];
-          const cx = b.x + b.w / 2;
-          const cy = b.y + b.h / 2;
-          let side = Math.max(b.w, b.h) * 1.5;
+        if (yoloBoxes.length > 0) {
+          let best = yoloBoxes[0];
+          for (const b of yoloBoxes) {
+            if (b.w * b.h > best.w * best.h) best = b;
+          }
+          const cx = best.x + best.w / 2;
+          const cy = best.y + best.h / 2;
+          let side = Math.max(best.w, best.h) * 1.5;
           side = Math.min(side, detectorCanvas.width, detectorCanvas.height);
           let cropX = cx - side / 2;
           let cropY = cy - side / 2;
@@ -742,32 +755,16 @@ async function main() {
             SUB_DETECTOR_SIZE
           );
 
-          // Per-crop MP call needs a unique monotonic timestamp, otherwise
-          // VIDEO mode rejects the duplicate.
-          const mpResult = await faceLandmarker.detectForVideo(
+          mpResult = await faceLandmarker.detectForVideo(
             subCanvas,
-            performance.now() + i
+            performance.now()
           );
-          for (const lm of mpResult.faceLandmarks) {
-            detectedFaces.push(
-              lm.map((p) => ({
-                x: cropX + p.x * side,
-                y: cropY + p.y * side,
-              }))
-            );
+          if (mpResult.faceLandmarks.length > 0) {
+            landmarkToDet = (p) => ({
+              x: cropX + p.x * side,
+              y: cropY + p.y * side,
+            });
           }
-        }
-      } else {
-        // Bootstrap: until YOLO finishes loading, run MP on the full detector
-        // input so we still get faces (just without the small-face boost).
-        const mpResult = await faceLandmarker.detectForVideo(
-          detectorCanvas,
-          performance.now()
-        );
-        for (const lm of mpResult.faceLandmarks) {
-          detectedFaces.push(
-            lm.map((p) => ({ x: p.x * t.detW, y: p.y * t.detH }))
-          );
         }
       }
 
@@ -775,8 +772,11 @@ async function main() {
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      const facesPx: Point[][] = detectedFaces.map((lm) =>
-        lm.map((p) => pointToCanvas(p.x, p.y, t))
+      const facesPx: Point[][] = mpResult.faceLandmarks.map((lm) =>
+        lm.map((p) => {
+          const det = landmarkToDet(p);
+          return pointToCanvas(det.x, det.y, t);
+        })
       );
 
       const faces = tracker.update(facesPx, dt);
