@@ -14,6 +14,7 @@ import {
 import { FaceTracker, TrackedFace } from "./faceTracker";
 import { FACE_OVAL } from "./landmarks";
 import { GLEyeRenderer } from "./glEyeRenderer";
+import { YoloFaceDetector } from "./yoloFaceDetector";
 
 interface VisualParams {
   colorOnlyFace: boolean;
@@ -157,6 +158,28 @@ async function main() {
   });
 
   const faceLandmarker = await createFaceLandmarker();
+
+  // YOLO is the cold-start detector for small faces; it only runs when
+  // MediaPipe finds nothing on the full frame. Loading it in the background
+  // means we don't gate the rest of the app on it.
+  const yolo = new YoloFaceDetector();
+  let yoloReady = false;
+  yolo
+    .load()
+    .then(() => {
+      yoloReady = true;
+    })
+    .catch((err) => console.error("YOLO model load failed", err));
+
+  // Sub-canvas used for the cropped second-pass MP inference when YOLO finds
+  // a face MP missed. ~384px is enough headroom for MP's internal 256px
+  // rescale without burning bandwidth.
+  const SUB_DETECTOR_SIZE = 384;
+  const subCanvas = document.createElement("canvas");
+  subCanvas.width = SUB_DETECTOR_SIZE;
+  subCanvas.height = SUB_DETECTOR_SIZE;
+  const subCtx = subCanvas.getContext("2d")!;
+
   loading.style.display = "none";
 
   const physicsParams: PhysicsParams = { ...DEFAULT_PHYSICS_PARAMS };
@@ -686,16 +709,74 @@ async function main() {
 
       const t = buildTransform();
       renderDetectorFrame(t);
-      const result = await faceLandmarker.detectForVideo(
-        detectorCanvas,
-        performance.now()
-      );
+
+      // Each detected face: 478 landmarks in detectorCanvas-pixel coords.
+      const detectedFaces: { x: number; y: number }[][] = [];
+
+      if (yoloReady) {
+        // YOLO is the primary detector. For each YOLO bbox, render a 1.5x
+        // square padded crop into subCanvas and run MediaPipe on the crop —
+        // small faces fill the frame and MP gets dense pixels.
+        const yoloBoxes = await yolo.detect(detectorCanvas).catch(() => []);
+        for (let i = 0; i < yoloBoxes.length; i++) {
+          const b = yoloBoxes[i];
+          const cx = b.x + b.w / 2;
+          const cy = b.y + b.h / 2;
+          let side = Math.max(b.w, b.h) * 1.5;
+          side = Math.min(side, detectorCanvas.width, detectorCanvas.height);
+          let cropX = cx - side / 2;
+          let cropY = cy - side / 2;
+          cropX = Math.max(0, Math.min(detectorCanvas.width - side, cropX));
+          cropY = Math.max(0, Math.min(detectorCanvas.height - side, cropY));
+
+          subCtx.clearRect(0, 0, SUB_DETECTOR_SIZE, SUB_DETECTOR_SIZE);
+          subCtx.drawImage(
+            detectorCanvas,
+            cropX,
+            cropY,
+            side,
+            side,
+            0,
+            0,
+            SUB_DETECTOR_SIZE,
+            SUB_DETECTOR_SIZE
+          );
+
+          // Per-crop MP call needs a unique monotonic timestamp, otherwise
+          // VIDEO mode rejects the duplicate.
+          const mpResult = await faceLandmarker.detectForVideo(
+            subCanvas,
+            performance.now() + i
+          );
+          for (const lm of mpResult.faceLandmarks) {
+            detectedFaces.push(
+              lm.map((p) => ({
+                x: cropX + p.x * side,
+                y: cropY + p.y * side,
+              }))
+            );
+          }
+        }
+      } else {
+        // Bootstrap: until YOLO finishes loading, run MP on the full detector
+        // input so we still get faces (just without the small-face boost).
+        const mpResult = await faceLandmarker.detectForVideo(
+          detectorCanvas,
+          performance.now()
+        );
+        for (const lm of mpResult.faceLandmarks) {
+          detectedFaces.push(
+            lm.map((p) => ({ x: p.x * t.detW, y: p.y * t.detH }))
+          );
+        }
+      }
+
       detecting = false;
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      const facesPx: Point[][] = result.faceLandmarks.map((lm) =>
-        lm.map((p) => pointToCanvas(p.x * t.detW, p.y * t.detH, t))
+      const facesPx: Point[][] = detectedFaces.map((lm) =>
+        lm.map((p) => pointToCanvas(p.x, p.y, t))
       );
 
       const faces = tracker.update(facesPx, dt);
