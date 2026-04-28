@@ -26,6 +26,7 @@ interface VisualParams {
   faceSaturation: number; // 1 = original, >1 boosts saturation inside the face
   faceDilate: number; // px to expand the face polygon outward
   eyeFeather: number; // px of edge softening on the eye-socket fill
+  cropToBiggest: boolean; // post-render: zoom display to the biggest face
 }
 
 interface ViewTransform {
@@ -54,6 +55,7 @@ const DEFAULT_VISUAL_PARAMS: VisualParams = {
   faceSaturation: 1.3,
   faceDilate: 24,
   eyeFeather: 9,
+  cropToBiggest: false,
 };
 const DEFAULT_MIN_FACE_WIDTH = 185;
 
@@ -114,6 +116,10 @@ async function main() {
   const loading = document.getElementById("loading") as HTMLDivElement;
   const ctx = canvas.getContext("2d")!;
   const eyeRenderer = new GLEyeRenderer(glCanvas);
+
+  // Origin at top-left so the crop transform math is straightforward.
+  canvas.style.transformOrigin = "0 0";
+  glCanvas.style.transformOrigin = "0 0";
 
   // Offscreen canvas used to build a soft-edged color face overlay before
   // compositing it onto the grayscale background.
@@ -275,6 +281,7 @@ async function main() {
     label: "eye feather",
   });
   vis.addBinding(visualParams, "showDebug", { label: "debug overlay" });
+  vis.addBinding(visualParams, "cropToBiggest", { label: "zoom to face" });
 
   const trk = pane.addFolder({ title: "tracking" });
   trk.addBinding(tracker, "minFaceWidth", {
@@ -555,6 +562,118 @@ async function main() {
     ctx.drawImage(maskCanvas, 0, 0);
   }
 
+  // Smoothed bbox for the post-render zoom-to-face effect. Smoothing keeps the
+  // magnified view from jittering as raw landmarks twitch frame to frame.
+  let zoomCx = 0;
+  let zoomCy = 0;
+  let zoomW = 0;
+  let zoomH = 0;
+  let zoomInit = false;
+
+  function applyZoomToFace(
+    faces: TrackedFace[],
+    t: ViewTransform,
+    dt: number
+  ) {
+    if (!visualParams.cropToBiggest || faces.length === 0) {
+      canvas.style.transform = "";
+      glCanvas.style.transform = "";
+      zoomInit = false;
+      return;
+    }
+
+    let bestArea = 0;
+    let bx = 0,
+      by = 0,
+      bw = 0,
+      bh = 0;
+    for (const f of faces) {
+      let minX = Infinity,
+        minY = Infinity,
+        maxX = -Infinity,
+        maxY = -Infinity;
+      for (const p of f.landmarks) {
+        if (p.x < minX) minX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y > maxY) maxY = p.y;
+      }
+      const w = maxX - minX;
+      const h = maxY - minY;
+      const area = w * h;
+      if (area > bestArea) {
+        bestArea = area;
+        bx = minX;
+        by = minY;
+        bw = w;
+        bh = h;
+      }
+    }
+    if (bestArea === 0) {
+      canvas.style.transform = "";
+      glCanvas.style.transform = "";
+      zoomInit = false;
+      return;
+    }
+
+    const cx = bx + bw / 2;
+    const cy = by + bh / 2;
+
+    const k = 1 - Math.exp(-Math.max(dt, 0) / 0.4);
+    if (!zoomInit) {
+      zoomCx = cx;
+      zoomCy = cy;
+      zoomW = bw;
+      zoomH = bh;
+      zoomInit = true;
+    } else {
+      zoomCx += (cx - zoomCx) * k;
+      zoomCy += (cy - zoomCy) * k;
+      zoomW += (bw - zoomW) * k;
+      zoomH += (bh - zoomH) * k;
+    }
+
+    // Video content rectangle in canvas coords. The video is drawn centered
+    // and scaled by t.scale; outside this rect the canvas is empty/cleared.
+    const rotW = Math.abs(t.cos) * t.vW + Math.abs(t.sin) * t.vH;
+    const rotH = Math.abs(t.sin) * t.vW + Math.abs(t.cos) * t.vH;
+    const contentW = rotW * t.scale;
+    const contentH = rotH * t.scale;
+    const contentLeft = (canvas.width - contentW) / 2;
+    const contentTop = (canvas.height - contentH) / 2;
+    const contentRight = contentLeft + contentW;
+    const contentBottom = contentTop + contentH;
+
+    // Pick zoom: enough to fit the face with padding, but never less than the
+    // amount needed for the content rect to cover the viewport on both axes
+    // (otherwise the transform would expose canvas-clear regions / letterbox).
+    const padding = 1.6;
+    const targetZoom = Math.min(
+      canvas.width / (zoomW * padding),
+      canvas.height / (zoomH * padding)
+    );
+    const minZoom = Math.max(
+      canvas.width / contentW,
+      canvas.height / contentH
+    );
+    const zoom = Math.max(targetZoom, minZoom);
+
+    // Translation: aim to center the smoothed face, then clamp so the content
+    // rect (post-transform) covers the viewport edges.
+    const txTarget = canvas.width / 2 - zoomCx * zoom;
+    const tyTarget = canvas.height / 2 - zoomCy * zoom;
+    const txMin = canvas.width - contentRight * zoom;
+    const txMax = -contentLeft * zoom;
+    const tyMin = canvas.height - contentBottom * zoom;
+    const tyMax = -contentTop * zoom;
+    const tx = Math.min(Math.max(txTarget, txMin), txMax);
+    const ty = Math.min(Math.max(tyTarget, tyMin), tyMax);
+
+    const transform = `translate(${tx}px, ${ty}px) scale(${zoom})`;
+    canvas.style.transform = transform;
+    glCanvas.style.transform = transform;
+  }
+
   let detecting = false;
   async function loop() {
     const now = performance.now();
@@ -594,6 +713,8 @@ async function main() {
       if (visualParams.showDebug) {
         drawDebugOverlay(ctx, faces);
       }
+
+      applyZoomToFace(faces, t, dt);
     }
 
     requestAnimationFrame(loop);
