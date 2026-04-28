@@ -26,8 +26,8 @@ interface ViewTransform {
   scale: number; // total source→canvas scale (auto-fit × user)
   vW: number; // source video width
   vH: number;
-  rotW: number; // rotated-frame width
-  rotH: number; // rotated-frame height
+  detW: number; // detector input width = visible-on-display region of rotated frame
+  detH: number; // detector input height
   cW: number; // canvas width
   cH: number;
   mirror: number; // -1 or 1
@@ -351,6 +351,11 @@ async function main() {
     const rotH = Math.abs(sin) * vW + Math.abs(cos) * vH;
     const fit = Math.min(cW / rotW, cH / rotH);
     const scale = fit * visualParams.imageScale;
+    // Detector input is the part of the rotated frame that's actually visible
+    // on screen at this scale. When the user zooms in (scale > fit), we crop
+    // accordingly so the network sees the same view.
+    const detW = Math.min(rotW, cW / scale);
+    const detH = Math.min(rotH, cH / scale);
     return {
       cos,
       sin,
@@ -358,19 +363,19 @@ async function main() {
       scale,
       vW,
       vH,
-      rotW,
-      rotH,
+      detW,
+      detH,
       cW,
       cH,
       mirror: visualParams.mirror ? -1 : 1,
     };
   }
 
-  // Maps a point in the rotated-detector-canvas frame to the display canvas.
-  function pointToCanvas(rotX: number, rotY: number, t: ViewTransform): Point {
+  // Maps a point in the detector-canvas frame to the display canvas.
+  function pointToCanvas(detX: number, detY: number, t: ViewTransform): Point {
     return {
-      x: (rotX - t.rotW / 2) * t.scale + t.cW / 2,
-      y: (rotY - t.rotH / 2) * t.scale + t.cH / 2,
+      x: (detX - t.detW / 2) * t.scale + t.cW / 2,
+      y: (detY - t.detH / 2) * t.scale + t.cH / 2,
     };
   }
 
@@ -383,18 +388,20 @@ async function main() {
   }
 
   // Offscreen canvas holding the rotated+mirrored video frame fed to the
-  // landmarker. Rotating the input lets the network see an upright face when
-  // the user has tilted the view.
+  // landmarker. Sized to the visible-on-screen region so when the user zooms
+  // in, the network sees the same crop and small faces fill more pixels.
   const detectorCanvas = document.createElement("canvas");
   const detectorCtx = detectorCanvas.getContext("2d")!;
 
   function renderDetectorFrame(t: ViewTransform) {
-    const w = Math.max(1, Math.ceil(t.rotW));
-    const h = Math.max(1, Math.ceil(t.rotH));
+    const w = Math.max(1, Math.ceil(t.detW));
+    const h = Math.max(1, Math.ceil(t.detH));
     if (detectorCanvas.width !== w) detectorCanvas.width = w;
     if (detectorCanvas.height !== h) detectorCanvas.height = h;
     detectorCtx.setTransform(1, 0, 0, 1, 0, 0);
     detectorCtx.clearRect(0, 0, w, h);
+    // Drawing the full rotated/mirrored video centered on the detector canvas
+    // naturally clips anything outside — that's the zoom crop we want.
     detectorCtx.translate(w / 2, h / 2);
     detectorCtx.rotate(t.rad);
     detectorCtx.scale(t.mirror, 1);
@@ -429,25 +436,28 @@ async function main() {
     }
   }
 
-  function loop() {
+  let detecting = false;
+  async function loop() {
     const now = performance.now();
     const dt = (now - lastTime) / 1000;
     lastTime = now;
 
-    if (video.currentTime !== lastVideoTime) {
+    if (!detecting && video.currentTime !== lastVideoTime) {
       lastVideoTime = video.currentTime;
+      detecting = true;
 
       const t = buildTransform();
       renderDetectorFrame(t);
-      const result = faceLandmarker.detectForVideo(
+      const result = await faceLandmarker.detectForVideo(
         detectorCanvas,
         performance.now()
       );
+      detecting = false;
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       const facesPx: Point[][] = result.faceLandmarks.map((lm) =>
-        lm.map((p) => pointToCanvas(p.x * t.rotW, p.y * t.rotH, t))
+        lm.map((p) => pointToCanvas(p.x * t.detW, p.y * t.detH, t))
       );
 
       const faces = tracker.update(facesPx, dt);
