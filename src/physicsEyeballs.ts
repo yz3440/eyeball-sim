@@ -1,5 +1,5 @@
 import * as planck from "planck";
-import { Point } from "./faceRenderer";
+import { dilatePolygon, Point } from "./faceRenderer";
 import { GLEyeRenderer } from "./glEyeRenderer";
 import {
   RIGHT_EYE,
@@ -30,20 +30,23 @@ export interface PhysicsParams {
   /** 0..1 — how much the ball follows the eye when the head moves.
    *  1 = rigidly glued, 0 = ignores head motion (heavy slosh). */
   eyeDrag: number;
+  /** px to push each eye-contour vertex outward; affects both physics and rendering. */
+  eyeDilate: number;
 }
 
 export const DEFAULT_PHYSICS_PARAMS: PhysicsParams = {
-  gravity: 11.5,
+  gravity: 45.5,
   linearDamping: 3.3,
   restitution: 0.8,
   friction: 0.05,
-  density: 1.0,
+  density: 1.6,
   eyeballSizeRatio: 0.35,
   landmarkSmooth: 0.7,
   springStrength: 28,
   earClosedThreshold: 0.11,
-  alphaTimeConstant: 0.24,
+  alphaTimeConstant: 0.32,
   eyeDrag: 0.15,
+  eyeDilate: 0.5,
 };
 
 interface EyeBasis {
@@ -308,6 +311,10 @@ export class PersonEyeballs {
 
     this.smoothedLeft = this.smoothContour(pts, LEFT_EYE, this.smoothedLeft);
     this.smoothedRight = this.smoothContour(pts, RIGHT_EYE, this.smoothedRight);
+    if (p.eyeDilate !== 0) {
+      this.smoothedLeft = dilatePolygon(this.smoothedLeft, p.eyeDilate);
+      this.smoothedRight = dilatePolygon(this.smoothedRight, p.eyeDilate);
+    }
 
     const rEar = eyeAspectRatio(
       pts,

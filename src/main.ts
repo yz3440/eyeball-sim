@@ -1,6 +1,11 @@
 import { Pane } from "tweakpane";
 import { createFaceLandmarker } from "./faceLandmarker";
-import { fillEyesWhite, Point } from "./faceRenderer";
+import {
+  fillEyesWhite,
+  Point,
+  addPolygonSubpath,
+  dilatePolygon,
+} from "./faceRenderer";
 import {
   EyeballSystem,
   DEFAULT_PHYSICS_PARAMS,
@@ -17,6 +22,10 @@ interface VisualParams {
   imageScale: number; // 1 = auto-fit (contain); >1 zooms in
   mirror: boolean;
   showDebug: boolean;
+  faceFeather: number; // px of edge softening on the face cutout
+  faceSaturation: number; // 1 = original, >1 boosts saturation inside the face
+  faceDilate: number; // px to expand the face polygon outward
+  eyeFeather: number; // px of edge softening on the eye-socket fill
 }
 
 interface ViewTransform {
@@ -36,13 +45,17 @@ interface ViewTransform {
 const STORAGE_KEY = "eyeball-sim/settings/v1";
 const DEFAULT_VISUAL_PARAMS: VisualParams = {
   colorOnlyFace: true,
-  grayscaleStrength: 1,
+  grayscaleStrength: 0.55,
   rotation: 0,
-  imageScale: 1,
+  imageScale: 1.2,
   mirror: true,
   showDebug: false,
+  faceFeather: 80,
+  faceSaturation: 1.3,
+  faceDilate: 24,
+  eyeFeather: 9,
 };
-const DEFAULT_MIN_FACE_WIDTH = 60;
+const DEFAULT_MIN_FACE_WIDTH = 185;
 
 interface StoredSettings {
   physics?: Partial<PhysicsParams>;
@@ -102,9 +115,16 @@ async function main() {
   const ctx = canvas.getContext("2d")!;
   const eyeRenderer = new GLEyeRenderer(glCanvas);
 
+  // Offscreen canvas used to build a soft-edged color face overlay before
+  // compositing it onto the grayscale background.
+  const maskCanvas = document.createElement("canvas");
+  const maskCtx = maskCanvas.getContext("2d")!;
+
   function resize() {
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
+    maskCanvas.width = window.innerWidth;
+    maskCanvas.height = window.innerHeight;
     eyeRenderer.resize(window.innerWidth, window.innerHeight);
   }
   resize();
@@ -200,6 +220,12 @@ async function main() {
     step: 0.01,
     label: "fade time",
   });
+  eye.addBinding(physicsParams, "eyeDilate", {
+    min: -10,
+    max: 30,
+    step: 0.5,
+    label: "dilate",
+  });
 
   const view = pane.addFolder({ title: "view" });
   view.addBinding(visualParams, "rotation", {
@@ -223,6 +249,30 @@ async function main() {
     max: 1,
     step: 0.05,
     label: "bg grayscale",
+  });
+  vis.addBinding(visualParams, "faceFeather", {
+    min: 0,
+    max: 100,
+    step: 1,
+    label: "face feather",
+  });
+  vis.addBinding(visualParams, "faceDilate", {
+    min: -50,
+    max: 100,
+    step: 1,
+    label: "face dilate",
+  });
+  vis.addBinding(visualParams, "faceSaturation", {
+    min: 0,
+    max: 3,
+    step: 0.05,
+    label: "face saturation",
+  });
+  vis.addBinding(visualParams, "eyeFeather", {
+    min: 0,
+    max: 30,
+    step: 1,
+    label: "eye feather",
   });
   vis.addBinding(visualParams, "showDebug", { label: "debug overlay" });
 
@@ -413,27 +463,96 @@ async function main() {
   let lastTime = performance.now();
 
   function drawBackground(faces: TrackedFace[], t: ViewTransform) {
-    if (visualParams.colorOnlyFace) {
-      ctx.save();
-      ctx.filter = `grayscale(${visualParams.grayscaleStrength})`;
-      applyVideoTransform(ctx, t);
-      ctx.drawImage(video, 0, 0);
-      ctx.restore();
-
-      for (const f of faces) {
-        ctx.save();
-        traceFaceOval(ctx, f.landmarks);
-        ctx.clip();
-        applyVideoTransform(ctx, t);
-        ctx.drawImage(video, 0, 0);
-        ctx.restore();
-      }
-    } else {
+    if (!visualParams.colorOnlyFace) {
       ctx.save();
       applyVideoTransform(ctx, t);
       ctx.drawImage(video, 0, 0);
       ctx.restore();
+      return;
     }
+
+    // grayscale full-frame background
+    ctx.save();
+    ctx.filter = `grayscale(${visualParams.grayscaleStrength})`;
+    applyVideoTransform(ctx, t);
+    ctx.drawImage(video, 0, 0);
+    ctx.restore();
+
+    if (faces.length === 0) return;
+
+    // Build a soft-edged color face overlay on the mask canvas:
+    // 1) draw the color video, 2) keep only what's under a blurred polygon
+    //    via destination-in, which produces a feathered alpha edge.
+    maskCtx.save();
+    maskCtx.setTransform(1, 0, 0, 1, 0, 0);
+    maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+    if (visualParams.faceSaturation !== 1) {
+      maskCtx.filter = `saturate(${visualParams.faceSaturation})`;
+    }
+    applyVideoTransform(maskCtx, t);
+    maskCtx.drawImage(video, 0, 0);
+    maskCtx.restore();
+
+    // Build a single combined path of all face ovals (dilated if requested)
+    // and apply destination-in once. Doing it per-face would wipe earlier
+    // faces from the mask canvas.
+    maskCtx.save();
+    maskCtx.globalCompositeOperation = "destination-in";
+    if (visualParams.faceFeather > 0) {
+      maskCtx.filter = `blur(${visualParams.faceFeather}px)`;
+    }
+    maskCtx.fillStyle = "white";
+    maskCtx.beginPath();
+    const dilate = visualParams.faceDilate;
+    for (const f of faces) {
+      let oval = FACE_OVAL.map((i) => f.landmarks[i]);
+      if (dilate !== 0) oval = dilatePolygon(oval, dilate);
+      addPolygonSubpath(maskCtx, oval);
+    }
+    maskCtx.fill();
+    maskCtx.restore();
+
+    ctx.drawImage(maskCanvas, 0, 0);
+  }
+
+  function drawEyeSockets(faces: TrackedFace[]) {
+    const feather = visualParams.eyeFeather;
+
+    if (feather <= 0) {
+      for (const f of faces) {
+        const { left, right } = f.person.getSmoothedContours();
+        fillEyesWhite(ctx, left, right);
+      }
+      return;
+    }
+
+    // Render the (already gradient-shaded) eye fills to the mask canvas, then
+    // mask via destination-in with a blurred polygon to feather the edges.
+    maskCtx.save();
+    maskCtx.setTransform(1, 0, 0, 1, 0, 0);
+    maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+    for (const f of faces) {
+      const { left, right } = f.person.getSmoothedContours();
+      fillEyesWhite(maskCtx, left, right);
+    }
+    maskCtx.restore();
+
+    // Apply destination-in once with the union of both eye polygons. Doing it
+    // per-polygon would wipe the other eye's content with each subsequent fill.
+    maskCtx.save();
+    maskCtx.globalCompositeOperation = "destination-in";
+    maskCtx.filter = `blur(${feather}px)`;
+    maskCtx.fillStyle = "white";
+    maskCtx.beginPath();
+    for (const f of faces) {
+      const { left, right } = f.person.getSmoothedContours();
+      if (left.length > 0) addPolygonSubpath(maskCtx, left);
+      if (right.length > 0) addPolygonSubpath(maskCtx, right);
+    }
+    maskCtx.fill();
+    maskCtx.restore();
+
+    ctx.drawImage(maskCanvas, 0, 0);
   }
 
   let detecting = false;
@@ -465,10 +584,7 @@ async function main() {
 
       drawBackground(faces, t);
 
-      for (const f of faces) {
-        const { left, right } = f.person.getSmoothedContours();
-        fillEyesWhite(ctx, left, right);
-      }
+      drawEyeSockets(faces);
 
       eyeRenderer.beginFrame();
       for (const f of faces) {
@@ -517,17 +633,6 @@ function drawDebugOverlay(ctx: CanvasRenderingContext2D, faces: TrackedFace[]) {
     ctx.fillText(`#${f.id}`, minX, minY - 2);
   }
   ctx.restore();
-}
-
-function traceFaceOval(ctx: CanvasRenderingContext2D, pts: Point[]) {
-  ctx.beginPath();
-  const first = pts[FACE_OVAL[0]];
-  ctx.moveTo(first.x, first.y);
-  for (let i = 1; i < FACE_OVAL.length; i++) {
-    const p = pts[FACE_OVAL[i]];
-    ctx.lineTo(p.x, p.y);
-  }
-  ctx.closePath();
 }
 
 main().catch(console.error);
