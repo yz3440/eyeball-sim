@@ -1,6 +1,7 @@
 import { EyeballSystem, PersonEyeballs } from "./physicsEyeballs";
 import { Point } from "./faceRenderer";
 import { FACE_OVAL } from "./landmarks";
+import { FaceMemory, FaceRecord } from "./faceMemory";
 
 const PRUNE_FRAMES = 30;
 const MATCH_THRESHOLD_PX = 150;
@@ -16,6 +17,9 @@ interface Entry {
   person: PersonEyeballs;
   lastCentroid: Point;
   framesSinceSeen: number;
+  /** localStorage-backed record for this face. We push counter updates into it
+   *  so the tally survives detector drops and page reloads. */
+  record: FaceRecord;
 }
 
 function faceCentroid(pts: Point[]): Point {
@@ -34,11 +38,12 @@ export class FaceTracker {
   minFaceWidth = 60;
 
   private system: EyeballSystem;
+  private memory: FaceMemory;
   private tracked: Entry[] = [];
-  private nextId = 1;
 
-  constructor(system: EyeballSystem) {
+  constructor(system: EyeballSystem, memory: FaceMemory) {
     this.system = system;
+    this.memory = memory;
   }
 
   /** `detected` must already be in canvas pixel space (mirroring/rotation
@@ -92,11 +97,17 @@ export class FaceTracker {
 
     for (let di = 0; di < faces.length; di++) {
       if (!detToEntry[di]) {
+        // Consult persistent memory: if this face matches a known signature,
+        // we adopt that ID and seed the marble counters from the stored tally.
+        const record = this.memory.identify(faces[di]);
+        const person = this.system.createPerson();
+        person.setDistances(record.leftDistanceM, record.rightDistanceM);
         const e: Entry = {
-          id: this.nextId++,
-          person: this.system.createPerson(),
+          id: record.id,
+          person,
           lastCentroid: centroids[di],
           framesSinceSeen: 0,
+          record,
         };
         this.tracked.push(e);
         detToEntry[di] = e;
@@ -108,6 +119,11 @@ export class FaceTracker {
       const e = detToEntry[di]!;
       e.lastCentroid = centroids[di];
       e.person.update(faces[di], dt);
+      // Mirror the live counters into the persistent record.
+      e.record.leftDistanceM = e.person.getLeftDistanceM();
+      e.record.rightDistanceM = e.person.getRightDistanceM();
+      e.record.lastSeenAt = Date.now();
+      this.memory.markUpdated();
       result.push({ id: e.id, landmarks: faces[di], person: e.person });
     }
 
@@ -119,10 +135,23 @@ export class FaceTracker {
       return true;
     });
 
+    this.memory.flush();
     return result;
   }
 
   resetAll() {
-    for (const e of this.tracked) e.person.respawn();
+    for (const e of this.tracked) {
+      e.person.respawn();
+      e.person.setDistances(0, 0);
+      e.record.leftDistanceM = 0;
+      e.record.rightDistanceM = 0;
+    }
+    this.memory.markUpdated();
+  }
+
+  /** Drop in-flight tracking after the persistent roster has been wiped. */
+  forgetAll() {
+    for (const e of this.tracked) this.system.destroyPerson(e.person);
+    this.tracked = [];
   }
 }

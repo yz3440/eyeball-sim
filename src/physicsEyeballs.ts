@@ -14,7 +14,15 @@ import {
   LEFT_EYE_INNER,
 } from "./landmarks";
 
-const SCALE = 100; // pixels per meter
+const SCALE = 100; // pixels per meter (planck world ↔ canvas)
+
+// Average adult bizygomatic (cheekbone-to-cheekbone) width. Used as the
+// real-world reference for converting the ball's pixel travel into meters.
+// ~14 cm spans typical male/female means in published anthropometric data.
+const FACE_WIDTH_M = 0.14;
+// MediaPipe FaceMesh indices for the right and left cheekbone (zygion area).
+const FACE_WIDTH_RIGHT = 234;
+const FACE_WIDTH_LEFT = 454;
 
 export interface PhysicsParams {
   gravity: number;
@@ -169,6 +177,12 @@ export class PersonEyeballs {
   private rightClosed = false;
 
   private spawned = false;
+
+  // Per-eye cumulative real-world travel of the marbles.
+  private leftDistanceM = 0;
+  private rightDistanceM = 0;
+  private leftLastPx: Point | null = null;
+  private rightLastPx: Point | null = null;
 
   constructor(world: planck.World, params: PhysicsParams) {
     this.world = world;
@@ -398,6 +412,58 @@ export class PersonEyeballs {
       this.softClamp(this.rightBall, pts, RIGHT_EYE, rWidth);
     }
     this.rightPrevBasis = rightBasis;
+
+    this.accumulateTravel(pts);
+  }
+
+  /** Add the per-frame ball displacement to the running total, converting
+   *  pixels to meters via the current face width. Skips frames where either
+   *  ball jumped more than half a face width — that's a teleport (respawn,
+   *  blink reset, snap-into-socket), not real travel. */
+  private accumulateTravel(pts: Point[]) {
+    const faceWidthPx = dist(pts[FACE_WIDTH_RIGHT], pts[FACE_WIDTH_LEFT]);
+    const lp = this.leftBall.getPosition();
+    const rp = this.rightBall.getPosition();
+    const lx = lp.x * SCALE;
+    const ly = lp.y * SCALE;
+    const rx = rp.x * SCALE;
+    const ry = rp.y * SCALE;
+
+    if (faceWidthPx > 1) {
+      const pxToM = FACE_WIDTH_M / faceWidthPx;
+      const maxJump = faceWidthPx * 0.5;
+      if (this.leftLastPx && !this.leftClosed) {
+        const d = Math.hypot(
+          lx - this.leftLastPx.x,
+          ly - this.leftLastPx.y
+        );
+        if (d < maxJump) this.leftDistanceM += d * pxToM;
+      }
+      if (this.rightLastPx && !this.rightClosed) {
+        const d = Math.hypot(
+          rx - this.rightLastPx.x,
+          ry - this.rightLastPx.y
+        );
+        if (d < maxJump) this.rightDistanceM += d * pxToM;
+      }
+    }
+
+    this.leftLastPx = { x: lx, y: ly };
+    this.rightLastPx = { x: rx, y: ry };
+  }
+
+  getLeftDistanceM(): number {
+    return this.leftDistanceM;
+  }
+
+  getRightDistanceM(): number {
+    return this.rightDistanceM;
+  }
+
+  /** Seed the running counters — used when restoring a known face from memory. */
+  setDistances(leftM: number, rightM: number) {
+    this.leftDistanceM = leftM;
+    this.rightDistanceM = rightM;
   }
 
   private rebuildWall(side: "left" | "right", contour: Point[]) {

@@ -15,6 +15,7 @@ import { FaceTracker, TrackedFace } from "./faceTracker";
 import { FACE_OVAL } from "./landmarks";
 import { GLEyeRenderer } from "./glEyeRenderer";
 import { YoloFaceDetector } from "./yoloFaceDetector";
+import { FaceMemory } from "./faceMemory";
 
 interface VisualParams {
   colorOnlyFace: boolean;
@@ -29,6 +30,7 @@ interface VisualParams {
   faceDilate: number; // px to expand the face polygon outward
   eyeFeather: number; // px of edge softening on the eye-socket fill
   cropToBiggest: boolean; // post-render: zoom display to the biggest face
+  showId: boolean; // overlay each tracked face's persistent ID
 }
 
 interface ViewTransform {
@@ -59,12 +61,24 @@ const DEFAULT_VISUAL_PARAMS: VisualParams = {
   faceDilate: 24,
   eyeFeather: 9,
   cropToBiggest: false,
+  showId: false,
 };
 const DEFAULT_MIN_FACE_WIDTH = 185;
+const DEFAULT_MATCH_THRESHOLD = 0.04;
+const DEFAULT_SIGNATURE_LEARN_RATE = 0.15;
+
+interface TrackingSettings {
+  minFaceWidth: number;
+  matchThreshold: number;
+  signatureLearnRate: number;
+}
 
 interface StoredSettings {
   physics?: Partial<PhysicsParams>;
   visual?: Partial<VisualParams>;
+  tracking?: Partial<TrackingSettings>;
+  /** Legacy: minFaceWidth used to live at the top level. Still read on load
+   *  for back-compat; new writes go into `tracking`. */
   minFaceWidth?: number;
   deviceId?: string;
 }
@@ -81,14 +95,14 @@ function loadSettings(): StoredSettings | null {
 function saveSettings(
   physics: PhysicsParams,
   visual: VisualParams,
-  minFaceWidth: number,
+  tracking: TrackingSettings,
   deviceId: string | null
 ) {
   try {
     const data: StoredSettings = {
       physics: { ...physics },
       visual: { ...visual },
-      minFaceWidth,
+      tracking: { ...tracking },
       ...(deviceId ? { deviceId } : {}),
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
@@ -182,9 +196,27 @@ async function main() {
   if (stored?.visual) Object.assign(visualParams, stored.visual);
 
   const system = new EyeballSystem(physicsParams);
-  const tracker = new FaceTracker(system);
-  if (typeof stored?.minFaceWidth === "number") {
-    tracker.minFaceWidth = stored.minFaceWidth;
+  const faceMemory = new FaceMemory();
+  const tracker = new FaceTracker(system, faceMemory);
+
+  // Restore tracking settings. Prefer the new nested location; fall back to
+  // the legacy top-level minFaceWidth from older saves.
+  const storedTracking = stored?.tracking;
+  const minFw = storedTracking?.minFaceWidth ?? stored?.minFaceWidth;
+  if (typeof minFw === "number") tracker.minFaceWidth = minFw;
+  if (typeof storedTracking?.matchThreshold === "number") {
+    faceMemory.matchThreshold = storedTracking.matchThreshold;
+  }
+  if (typeof storedTracking?.signatureLearnRate === "number") {
+    faceMemory.signatureLearnRate = storedTracking.signatureLearnRate;
+  }
+
+  function trackingSettings(): TrackingSettings {
+    return {
+      minFaceWidth: tracker.minFaceWidth,
+      matchThreshold: faceMemory.matchThreshold,
+      signatureLearnRate: faceMemory.signatureLearnRate,
+    };
   }
 
   const pane = new Pane({ title: "controls (c to hide)" });
@@ -304,6 +336,7 @@ async function main() {
   });
   vis.addBinding(visualParams, "showDebug", { label: "debug overlay" });
   vis.addBinding(visualParams, "cropToBiggest", { label: "zoom to face" });
+  vis.addBinding(visualParams, "showId", { label: "show face id" });
 
   const trk = pane.addFolder({ title: "tracking" });
   trk.addBinding(tracker, "minFaceWidth", {
@@ -311,6 +344,18 @@ async function main() {
     max: 600,
     step: 1,
     label: "min face px",
+  });
+  trk.addBinding(faceMemory, "matchThreshold", {
+    min: 0.005,
+    max: 0.3,
+    step: 0.005,
+    label: "id match thr",
+  });
+  trk.addBinding(faceMemory, "signatureLearnRate", {
+    min: 0,
+    max: 0.5,
+    step: 0.01,
+    label: "id learn rate",
   });
 
   let switching = false;
@@ -335,7 +380,7 @@ async function main() {
       saveSettings(
         physicsParams,
         visualParams,
-        tracker.minFaceWidth,
+        trackingSettings(),
         currentDeviceId
       );
     } finally {
@@ -388,15 +433,22 @@ async function main() {
     tracker.resetAll();
   });
 
+  pane.addButton({ title: "clear face memory" }).on("click", () => {
+    faceMemory.clear();
+    tracker.forgetAll();
+  });
+
   pane.addButton({ title: "reset settings to defaults" }).on("click", () => {
     Object.assign(physicsParams, DEFAULT_PHYSICS_PARAMS);
     Object.assign(visualParams, DEFAULT_VISUAL_PARAMS);
     tracker.minFaceWidth = DEFAULT_MIN_FACE_WIDTH;
+    faceMemory.matchThreshold = DEFAULT_MATCH_THRESHOLD;
+    faceMemory.signatureLearnRate = DEFAULT_SIGNATURE_LEARN_RATE;
     pane.refresh();
     saveSettings(
       physicsParams,
       visualParams,
-      tracker.minFaceWidth,
+      trackingSettings(),
       currentDeviceId
     );
   });
@@ -405,7 +457,7 @@ async function main() {
     saveSettings(
       physicsParams,
       visualParams,
-      tracker.minFaceWidth,
+      trackingSettings(),
       currentDeviceId
     );
   });
@@ -836,6 +888,9 @@ async function main() {
         f.person.draw(eyeRenderer);
       }
 
+      drawDistanceLabels(ctx, faces);
+      if (visualParams.showId) drawIdLabels(ctx, faces);
+
       if (comeCloser) drawComeCloser(comeCloser, t);
 
       if (visualParams.showDebug) {
@@ -849,6 +904,136 @@ async function main() {
   }
 
   requestAnimationFrame(loop);
+}
+
+function formatDistance(m: number): string {
+  if (m < 0.01) return `${(m * 1000).toFixed(0)} mm`;
+  if (m < 1) return `${(m * 100).toFixed(1)} cm`;
+  if (m < 1000) return `${m.toFixed(2)} m`;
+  return `${(m / 1000).toFixed(2)} km`;
+}
+
+function drawEyeLabel(
+  ctx: CanvasRenderingContext2D,
+  contour: Point[],
+  meters: number
+) {
+  if (contour.length === 0) return;
+
+  // contour[0] = outer corner, contour[8] = inner corner (see physicsEyeballs).
+  const outer = contour[0];
+  const inner = contour[8];
+  const eyeW = Math.hypot(outer.x - inner.x, outer.y - inner.y);
+
+  // Top of the eye in screen space — label sits straight above this.
+  let topX = contour[0].x;
+  let topY = contour[0].y;
+  for (const p of contour) {
+    if (p.y < topY) {
+      topY = p.y;
+      topX = p.x;
+    }
+  }
+
+  const dotR = Math.max(1.5, eyeW * 0.04);
+  const fontSize = Math.max(8, Math.min(18, eyeW * 0.28));
+  const dotGap = dotR + fontSize * 0.25;
+  const textGap = fontSize * 0.4;
+
+  const dotX = topX;
+  const dotY = topY - dotGap;
+
+  ctx.fillStyle = "black";
+  ctx.beginPath();
+  ctx.arc(dotX, dotY, dotR, 0, Math.PI * 2);
+  ctx.fill();
+
+  const text = formatDistance(meters);
+  const textY = dotY - dotR - textGap;
+  ctx.font = `bold ${fontSize}px monospace`;
+  ctx.lineWidth = Math.max(2, fontSize * 0.18);
+  ctx.strokeStyle = "rgba(0, 0, 0, 0.75)";
+  ctx.fillStyle = "white";
+  ctx.strokeText(text, dotX, textY);
+  ctx.fillText(text, dotX, textY);
+}
+
+function drawForeheadLabel(
+  ctx: CanvasRenderingContext2D,
+  face: TrackedFace
+) {
+  let minX = Infinity,
+    maxX = -Infinity,
+    minY = Infinity,
+    maxY = -Infinity;
+  for (const i of FACE_OVAL) {
+    const p = face.landmarks[i];
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
+  const faceW = maxX - minX;
+  const faceH = maxY - minY;
+  const fontSize = Math.max(10, Math.min(22, faceW * 0.09));
+
+  const cx = (minX + maxX) / 2;
+  // Sit a little below the top of the face oval, in the forehead band.
+  const cy = minY + faceH * 0.1;
+
+  ctx.font = `bold ${fontSize}px monospace`;
+  ctx.lineWidth = Math.max(2, fontSize * 0.18);
+  ctx.strokeStyle = "rgba(0, 0, 0, 0.8)";
+  ctx.fillStyle = "white";
+  ctx.strokeText("Pupil traveled", cx, cy);
+  ctx.fillText("Pupil traveled", cx, cy);
+}
+
+function drawDistanceLabels(
+  ctx: CanvasRenderingContext2D,
+  faces: TrackedFace[]
+) {
+  if (faces.length === 0) return;
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "alphabetic";
+  for (const f of faces) {
+    drawForeheadLabel(ctx, f);
+    const { left, right } = f.person.getSmoothedContours();
+    drawEyeLabel(ctx, left, f.person.getLeftDistanceM());
+    drawEyeLabel(ctx, right, f.person.getRightDistanceM());
+  }
+  ctx.restore();
+}
+
+function drawIdLabels(ctx: CanvasRenderingContext2D, faces: TrackedFace[]) {
+  if (faces.length === 0) return;
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  for (const f of faces) {
+    let minX = Infinity,
+      maxX = -Infinity,
+      maxY = -Infinity;
+    for (const i of FACE_OVAL) {
+      const p = f.landmarks[i];
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y > maxY) maxY = p.y;
+    }
+    const cx = (minX + maxX) / 2;
+    const faceW = maxX - minX;
+    const fontSize = Math.max(12, Math.min(36, faceW * 0.1));
+    const y = maxY + fontSize * 0.4;
+    const text = `#${f.id}`;
+    ctx.font = `bold ${fontSize}px monospace`;
+    ctx.lineWidth = Math.max(2, fontSize * 0.18);
+    ctx.strokeStyle = "rgba(0, 0, 0, 0.8)";
+    ctx.fillStyle = "white";
+    ctx.strokeText(text, cx, y);
+    ctx.fillText(text, cx, y);
+  }
+  ctx.restore();
 }
 
 function drawDebugOverlay(ctx: CanvasRenderingContext2D, faces: TrackedFace[]) {
