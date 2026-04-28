@@ -19,6 +19,7 @@ import { YoloFaceDetector } from "./yoloFaceDetector";
 interface VisualParams {
   colorOnlyFace: boolean;
   grayscaleStrength: number;
+  bgBrightness: number; // 1 = original, 0 = black
   rotation: number; // degrees, clockwise
   imageScale: number; // 1 = auto-fit (contain); >1 zooms in
   mirror: boolean;
@@ -48,6 +49,7 @@ const STORAGE_KEY = "eyeball-sim/settings/v1";
 const DEFAULT_VISUAL_PARAMS: VisualParams = {
   colorOnlyFace: true,
   grayscaleStrength: 0.55,
+  bgBrightness: 0.6,
   rotation: 0,
   imageScale: 1.2,
   mirror: true,
@@ -171,15 +173,6 @@ async function main() {
     })
     .catch((err) => console.error("YOLO model load failed", err));
 
-  // Sub-canvas used for the cropped second-pass MP inference when YOLO finds
-  // a face MP missed. ~384px is enough headroom for MP's internal 256px
-  // rescale without burning bandwidth.
-  const SUB_DETECTOR_SIZE = 384;
-  const subCanvas = document.createElement("canvas");
-  subCanvas.width = SUB_DETECTOR_SIZE;
-  subCanvas.height = SUB_DETECTOR_SIZE;
-  const subCtx = subCanvas.getContext("2d")!;
-
   loading.style.display = "none";
 
   const physicsParams: PhysicsParams = { ...DEFAULT_PHYSICS_PARAMS };
@@ -278,6 +271,12 @@ async function main() {
     max: 1,
     step: 0.05,
     label: "bg grayscale",
+  });
+  vis.addBinding(visualParams, "bgBrightness", {
+    min: 0,
+    max: 1,
+    step: 0.05,
+    label: "bg brightness",
   });
   vis.addBinding(visualParams, "faceFeather", {
     min: 0,
@@ -492,6 +491,76 @@ async function main() {
   let lastVideoTime = -1;
   let lastTime = performance.now();
 
+  // Smoothed circle for the "come closer" prompt — YOLO output jitters per
+  // frame and this is the only feedback the user has, so dampen it.
+  let lastComeCloser: { cx: number; cy: number; r: number } | null = null;
+  function smoothComeCloser(cx: number, cy: number, r: number, dt: number) {
+    const k = 1 - Math.exp(-Math.max(dt, 0) / 0.15);
+    if (!lastComeCloser) {
+      lastComeCloser = { cx, cy, r };
+    } else {
+      lastComeCloser.cx += (cx - lastComeCloser.cx) * k;
+      lastComeCloser.cy += (cy - lastComeCloser.cy) * k;
+      lastComeCloser.r += (r - lastComeCloser.r) * k;
+    }
+    return lastComeCloser;
+  }
+
+  function drawComeCloser(
+    box: { cx: number; cy: number; r: number },
+    t: ViewTransform
+  ) {
+    const ringR = box.r * 1.4;
+
+    // Mirror drawBackground's color-face cutout, but keyed on a circle
+    // instead of the FACE_OVAL polygon — saturated/full-brightness video
+    // inside, dim grayscale bg outside.
+    maskCtx.save();
+    maskCtx.setTransform(1, 0, 0, 1, 0, 0);
+    maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+    if (visualParams.faceSaturation !== 1) {
+      maskCtx.filter = `saturate(${visualParams.faceSaturation})`;
+    }
+    applyVideoTransform(maskCtx, t);
+    maskCtx.drawImage(video, 0, 0);
+    maskCtx.restore();
+
+    maskCtx.save();
+    maskCtx.globalCompositeOperation = "destination-in";
+    if (visualParams.faceFeather > 0) {
+      maskCtx.filter = `blur(${visualParams.faceFeather}px)`;
+    }
+    maskCtx.fillStyle = "white";
+    maskCtx.beginPath();
+    maskCtx.arc(box.cx, box.cy, ringR, 0, Math.PI * 2);
+    maskCtx.fill();
+    maskCtx.restore();
+
+    ctx.drawImage(maskCanvas, 0, 0);
+
+    ctx.save();
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.85)";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(box.cx, box.cy, ringR, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+
+    // Place the prompt in whichever half the circle isn't in.
+    ctx.save();
+    ctx.fillStyle = "white";
+    ctx.font = "bold 28px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    const inTopHalf = box.cy < canvas.height / 2;
+    const gap = 40;
+    const margin = 24;
+    const textY = inTopHalf ? box.cy + ringR + gap : box.cy - ringR - gap;
+    const textX = Math.max(margin, Math.min(canvas.width - margin, box.cx));
+    ctx.fillText("Come closer", textX, textY);
+    ctx.restore();
+  }
+
   function drawBackground(faces: TrackedFace[], t: ViewTransform) {
     if (!visualParams.colorOnlyFace) {
       ctx.save();
@@ -501,9 +570,9 @@ async function main() {
       return;
     }
 
-    // grayscale full-frame background
+    // grayscale + dimmed full-frame background
     ctx.save();
-    ctx.filter = `grayscale(${visualParams.grayscaleStrength})`;
+    ctx.filter = `grayscale(${visualParams.grayscaleStrength}) brightness(${visualParams.bgBrightness})`;
     applyVideoTransform(ctx, t);
     ctx.drawImage(video, 0, 0);
     ctx.restore();
@@ -710,22 +779,22 @@ async function main() {
       const t = buildTransform();
       renderDetectorFrame(t);
 
-      // First pass: MP on the full scale-aware detector frame. Cheap and
-      // catches multi-face when faces are big enough.
-      let mpResult = await faceLandmarker.detectForVideo(
+      // MP on the full scale-aware detector frame.
+      const mpResult = await faceLandmarker.detectForVideo(
         detectorCanvas,
         performance.now()
       );
 
-      // Default mapping: landmarks come in detectorCanvas-normalized coords.
-      let landmarkToDet = (p: { x: number; y: number }) => ({
+      const landmarkToDet = (p: { x: number; y: number }) => ({
         x: p.x * t.detW,
         y: p.y * t.detH,
       });
 
-      // Cold-start fallback: only when MP saw nothing. YOLO finds the bbox,
-      // we crop tightly around it and re-run MP on the crop. Skipping YOLO in
-      // the steady state keeps the M1 inference budget reasonable.
+      // Presence fallback: when MP saw nothing, ask YOLO if a face is
+      // present anyway. A second cropped MP pass is too slow on M1 — instead
+      // we use the YOLO bbox to render a "come closer" prompt so the user
+      // moves into the range MP can resolve.
+      let comeCloser: { cx: number; cy: number; r: number } | null = null;
       if (mpResult.faceLandmarks.length === 0 && yoloReady) {
         const yoloBoxes = await yolo.detect(detectorCanvas).catch(() => []);
         if (yoloBoxes.length > 0) {
@@ -733,40 +802,16 @@ async function main() {
           for (const b of yoloBoxes) {
             if (b.w * b.h > best.w * best.h) best = b;
           }
-          const cx = best.x + best.w / 2;
-          const cy = best.y + best.h / 2;
-          let side = Math.max(best.w, best.h) * 1.5;
-          side = Math.min(side, detectorCanvas.width, detectorCanvas.height);
-          let cropX = cx - side / 2;
-          let cropY = cy - side / 2;
-          cropX = Math.max(0, Math.min(detectorCanvas.width - side, cropX));
-          cropY = Math.max(0, Math.min(detectorCanvas.height - side, cropY));
-
-          subCtx.clearRect(0, 0, SUB_DETECTOR_SIZE, SUB_DETECTOR_SIZE);
-          subCtx.drawImage(
-            detectorCanvas,
-            cropX,
-            cropY,
-            side,
-            side,
-            0,
-            0,
-            SUB_DETECTOR_SIZE,
-            SUB_DETECTOR_SIZE
+          const center = pointToCanvas(
+            best.x + best.w / 2,
+            best.y + best.h / 2,
+            t
           );
-
-          mpResult = await faceLandmarker.detectForVideo(
-            subCanvas,
-            performance.now()
-          );
-          if (mpResult.faceLandmarks.length > 0) {
-            landmarkToDet = (p) => ({
-              x: cropX + p.x * side,
-              y: cropY + p.y * side,
-            });
-          }
+          const r = (Math.max(best.w, best.h) / 2) * t.scale;
+          comeCloser = smoothComeCloser(center.x, center.y, r, dt);
         }
       }
+      if (!comeCloser) lastComeCloser = null;
 
       detecting = false;
 
@@ -790,6 +835,8 @@ async function main() {
       for (const f of faces) {
         f.person.draw(eyeRenderer);
       }
+
+      if (comeCloser) drawComeCloser(comeCloser, t);
 
       if (visualParams.showDebug) {
         drawDebugOverlay(ctx, faces);
