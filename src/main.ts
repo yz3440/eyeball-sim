@@ -7,10 +7,10 @@ import {
   dilatePolygon,
 } from "./faceRenderer";
 import {
-  EyeballSystem,
+  EyeSystem,
   DEFAULT_PHYSICS_PARAMS,
   PhysicsParams,
-} from "./physicsEyeballs";
+} from "./physicsEyes";
 import { FaceTracker, TrackedFace } from "./faceTracker";
 import { FACE_OVAL } from "./landmarks";
 import { GLEyeRenderer } from "./glEyeRenderer";
@@ -48,7 +48,7 @@ interface ViewTransform {
   mirror: number; // -1 or 1
 }
 
-const STORAGE_KEY = "eyeball-sim/settings/v1";
+const STORAGE_KEY = "eye-roller/settings/v1";
 const DEFAULT_VISUAL_PARAMS: VisualParams = {
   colorOnlyFace: true,
   grayscaleStrength: 0.55,
@@ -197,7 +197,7 @@ async function main() {
   if (stored?.physics) Object.assign(physicsParams, stored.physics);
   if (stored?.visual) Object.assign(visualParams, stored.visual);
 
-  const system = new EyeballSystem(physicsParams);
+  const system = new EyeSystem(physicsParams);
   const faceMemory = new FaceMemory();
   const tracker = new FaceTracker(system, faceMemory);
 
@@ -260,7 +260,7 @@ async function main() {
   });
 
   const eye = pane.addFolder({ title: "eye" });
-  eye.addBinding(physicsParams, "eyeballSizeRatio", {
+  eye.addBinding(physicsParams, "eyeSizeRatio", {
     min: 0.1,
     max: 0.7,
     step: 0.01,
@@ -442,7 +442,7 @@ async function main() {
     );
   });
 
-  pane.addButton({ title: "reset eyeballs" }).on("click", () => {
+  pane.addButton({ title: "reset eyes" }).on("click", () => {
     tracker.resetAll();
   });
 
@@ -933,7 +933,7 @@ function drawEyeLabel(
 ) {
   if (contour.length === 0) return;
 
-  // contour[0] = outer corner, contour[8] = inner corner (see physicsEyeballs).
+  // contour[0] = outer corner, contour[8] = inner corner (see physicsEyes).
   const outer = contour[0];
   const inner = contour[8];
   const eyeW = Math.hypot(outer.x - inner.x, outer.y - inner.y);

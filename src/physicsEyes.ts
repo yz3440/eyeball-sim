@@ -30,7 +30,7 @@ export interface PhysicsParams {
   restitution: number;
   friction: number;
   density: number;
-  eyeballSizeRatio: number;
+  eyeSizeRatio: number;
   landmarkSmooth: number;
   springStrength: number;
   earClosedThreshold: number;
@@ -48,7 +48,7 @@ export const DEFAULT_PHYSICS_PARAMS: PhysicsParams = {
   restitution: 0.8,
   friction: 0.05,
   density: 1.6,
-  eyeballSizeRatio: 0.35,
+  eyeSizeRatio: 0.35,
   landmarkSmooth: 0.7,
   springStrength: 28,
   earClosedThreshold: 0.11,
@@ -130,7 +130,7 @@ function pointInPolygon(p: Point, poly: Point[]): boolean {
   return inside;
 }
 
-export class EyeballSystem {
+export class EyeSystem {
   readonly world: planck.World;
   readonly params: PhysicsParams;
 
@@ -139,11 +139,11 @@ export class EyeballSystem {
     this.world = new planck.World(planck.Vec2(0, params.gravity));
   }
 
-  createPerson(): PersonEyeballs {
-    return new PersonEyeballs(this.world, this.params);
+  createPerson(): PersonEyes {
+    return new PersonEyes(this.world, this.params);
   }
 
-  destroyPerson(person: PersonEyeballs) {
+  destroyPerson(person: PersonEyes) {
     person.dispose();
   }
 
@@ -154,7 +154,7 @@ export class EyeballSystem {
   }
 }
 
-export class PersonEyeballs {
+export class PersonEyes {
   private world: planck.World;
   private params: PhysicsParams;
   private leftBall: planck.Body;
@@ -361,11 +361,11 @@ export class PersonEyeballs {
     const rWidth = dist(pts[RIGHT_EYE_OUTER], pts[RIGHT_EYE_INNER]);
     const lWidth = dist(pts[LEFT_EYE_OUTER], pts[LEFT_EYE_INNER]);
     const newRightRadius = Math.max(
-      (this.rightClosed ? rWidth * 0.25 : rh) * p.eyeballSizeRatio,
+      (this.rightClosed ? rWidth * 0.25 : rh) * p.eyeSizeRatio,
       0.5
     );
     const newLeftRadius = Math.max(
-      (this.leftClosed ? lWidth * 0.25 : lh) * p.eyeballSizeRatio,
+      (this.leftClosed ? lWidth * 0.25 : lh) * p.eyeSizeRatio,
       0.5
     );
     // Threshold scales with current size so small balls update at small steps.

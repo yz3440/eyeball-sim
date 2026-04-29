@@ -1,4 +1,4 @@
-import { EyeballSystem, PersonEyeballs } from "./physicsEyeballs";
+import { EyeSystem, PersonEyes } from "./physicsEyes";
 import { Point } from "./faceRenderer";
 import { FACE_OVAL } from "./landmarks";
 import { FaceMemory, FaceRecord } from "./faceMemory";
@@ -9,12 +9,12 @@ const MATCH_THRESHOLD_PX = 150;
 export interface TrackedFace {
   id: number;
   landmarks: Point[];
-  person: PersonEyeballs;
+  person: PersonEyes;
 }
 
 interface Entry {
   id: number;
-  person: PersonEyeballs;
+  person: PersonEyes;
   lastCentroid: Point;
   framesSinceSeen: number;
   /** localStorage-backed record for this face. We push counter updates into it
@@ -37,11 +37,11 @@ export class FaceTracker {
    *  ignored — too small to render eyes meaningfully. */
   minFaceWidth = 60;
 
-  private system: EyeballSystem;
+  private system: EyeSystem;
   private memory: FaceMemory;
   private tracked: Entry[] = [];
 
-  constructor(system: EyeballSystem, memory: FaceMemory) {
+  constructor(system: EyeSystem, memory: FaceMemory) {
     this.system = system;
     this.memory = memory;
   }

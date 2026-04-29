@@ -5,7 +5,7 @@ import {
   signatureDistance,
 } from "./faceSignature";
 
-const STORAGE_KEY = "eyeball-sim/faces/v1";
+const STORAGE_KEY = "eye-roller/faces/v1";
 const MAX_ENTRIES = 32;
 const STALE_MS = 1000 * 60 * 60 * 24 * 30; // forget faces unseen for 30 days
 

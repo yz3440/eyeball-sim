@@ -1,6 +1,6 @@
-# Eyeball Simulator
+# Eye Roller
 
-A webcam toy that puts physics-driven eyeballs into your eye sockets. They roll around with gravity and head motion, and disappear when you blink.
+A webcam toy that drops a rolling pupil into each of your eyes. The pupils tumble around with gravity and head motion, and disappear when you blink.
 
 ![Demo](assets/demo.gif)
 
@@ -8,9 +8,9 @@ A webcam toy that puts physics-driven eyeballs into your eye sockets. They roll 
 
 1. The webcam feeds [MediaPipe Face Landmarker](https://developers.google.com/mediapipe/solutions/vision/face_landmarker), which returns 478 landmarks per face every frame.
 2. The eye-socket landmarks get turned into a static collision contour inside a [Planck.js](https://piqnt.com/planck.js) world (Planck is a Box2D port).
-3. A circle body, the eyeball, sits inside each socket. A soft spring pulls it toward the socket center, while gravity and head motion push it around.
-4. Each frame, the canvas redraws the video, paints the sockets white, and renders the eyeballs on top.
-5. Closing an eye (detected via eye-aspect-ratio) fades the eyeball out. Opening it back up fades it in.
+3. A circle body — the rolling pupil — sits inside each socket. A soft spring pulls it toward the socket center, while gravity and head motion push it around.
+4. Each frame, the canvas redraws the video, paints the sockets white, and renders the pupils on top.
+5. Closing an eye (detected via eye-aspect-ratio) fades the pupil out. Opening it back up fades it in.
 
 ## Tech stack
 
