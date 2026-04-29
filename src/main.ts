@@ -31,6 +31,7 @@ interface VisualParams {
   eyeFeather: number; // px of edge softening on the eye-socket fill
   cropToBiggest: boolean; // post-render: zoom display to the biggest face
   showId: boolean; // overlay each tracked face's persistent ID
+  showPupilTraveled: boolean; // forehead "Pupil traveled" label + per-eye numbers
 }
 
 interface ViewTransform {
@@ -62,6 +63,7 @@ const DEFAULT_VISUAL_PARAMS: VisualParams = {
   eyeFeather: 9,
   cropToBiggest: false,
   showId: false,
+  showPupilTraveled: true,
 };
 const DEFAULT_MIN_FACE_WIDTH = 185;
 const DEFAULT_MATCH_THRESHOLD = 0.04;
@@ -220,6 +222,14 @@ async function main() {
   }
 
   const pane = new Pane({ title: "controls (c to hide)" });
+  // Tweakpane has no built-in overflow handling — once the panel is taller
+  // than the viewport, the bottom controls become unreachable. Cap the root
+  // height and let it scroll.
+  {
+    const el = pane.element as HTMLElement;
+    el.style.maxHeight = "calc(100vh - 16px)";
+    el.style.overflowY = "auto";
+  }
   const phys = pane.addFolder({ title: "physics" });
   phys.addBinding(physicsParams, "gravity", { min: -30, max: 50, step: 0.5 });
   phys.addBinding(physicsParams, "linearDamping", {
@@ -337,6 +347,9 @@ async function main() {
   vis.addBinding(visualParams, "showDebug", { label: "debug overlay" });
   vis.addBinding(visualParams, "cropToBiggest", { label: "zoom to face" });
   vis.addBinding(visualParams, "showId", { label: "show face id" });
+  vis.addBinding(visualParams, "showPupilTraveled", {
+    label: "show pupil dist",
+  });
 
   const trk = pane.addFolder({ title: "tracking" });
   trk.addBinding(tracker, "minFaceWidth", {
@@ -888,7 +901,7 @@ async function main() {
         f.person.draw(eyeRenderer);
       }
 
-      drawDistanceLabels(ctx, faces);
+      if (visualParams.showPupilTraveled) drawDistanceLabels(ctx, faces);
       if (visualParams.showId) drawIdLabels(ctx, faces);
 
       if (comeCloser) drawComeCloser(comeCloser, t);
@@ -975,7 +988,7 @@ function drawForeheadLabel(
   }
   const faceW = maxX - minX;
   const faceH = maxY - minY;
-  const fontSize = Math.max(10, Math.min(22, faceW * 0.09));
+  const fontSize = Math.max(7, Math.min(13, faceW * 0.055));
 
   const cx = (minX + maxX) / 2;
   // Sit a little below the top of the face oval, in the forehead band.
