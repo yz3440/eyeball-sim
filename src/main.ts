@@ -11,7 +11,7 @@ import {
   DEFAULT_PHYSICS_PARAMS,
   PhysicsParams,
 } from "./physicsEyes";
-import { FaceTracker, TrackedFace } from "./faceTracker";
+import { FaceTracker, TrackedFace, faceBBox } from "./faceTracker";
 import { FACE_OVAL } from "./landmarks";
 import { GLEyeRenderer } from "./glEyeRenderer";
 import { YoloFaceDetector } from "./yoloFaceDetector";
@@ -855,25 +855,59 @@ async function main() {
         y: p.y * t.detH,
       });
 
-      // Presence fallback: when MP saw nothing, ask YOLO if a face is
-      // present anyway. A second cropped MP pass is too slow on M1 — instead
-      // we use the YOLO bbox to render a "come closer" prompt so the user
-      // moves into the range MP can resolve.
+      const facesPx: Point[][] = mpResult.faceLandmarks.map((lm) =>
+        lm.map((p) => {
+          const det = landmarkToDet(p);
+          return pointToCanvas(det.x, det.y, t);
+        })
+      );
+
+      // Partition MP faces by size. Faces below the threshold can't be
+      // rendered as eyes meaningfully, so we route them into the same
+      // "come closer" path that handles MP misses.
+      const validFaces: Point[][] = [];
+      const smallFaceBoxes: { cx: number; cy: number; r: number }[] = [];
+      for (const pts of facesPx) {
+        const bb = faceBBox(pts);
+        if (bb.diag >= tracker.minFaceWidth) {
+          validFaces.push(pts);
+        } else {
+          smallFaceBoxes.push({
+            cx: bb.cx,
+            cy: bb.cy,
+            r: Math.max(bb.w, bb.h) / 2,
+          });
+        }
+      }
+
+      // Presence fallback: when MP found no usable face, prefer a too-small
+      // MP face for the prompt; otherwise ask YOLO if a face is present
+      // anyway. A second cropped MP pass is too slow on M1 — instead we use
+      // the bbox to render a "come closer" prompt so the user moves into
+      // the range MP can resolve.
       let comeCloser: { cx: number; cy: number; r: number } | null = null;
-      if (mpResult.faceLandmarks.length === 0 && yoloReady) {
-        const yoloBoxes = await yolo.detect(detectorCanvas).catch(() => []);
-        if (yoloBoxes.length > 0) {
-          let best = yoloBoxes[0];
-          for (const b of yoloBoxes) {
-            if (b.w * b.h > best.w * best.h) best = b;
+      if (validFaces.length === 0) {
+        if (smallFaceBoxes.length > 0) {
+          let best = smallFaceBoxes[0];
+          for (const b of smallFaceBoxes) {
+            if (b.r > best.r) best = b;
           }
-          const center = pointToCanvas(
-            best.x + best.w / 2,
-            best.y + best.h / 2,
-            t
-          );
-          const r = (Math.max(best.w, best.h) / 2) * t.scale;
-          comeCloser = smoothComeCloser(center.x, center.y, r, dt);
+          comeCloser = smoothComeCloser(best.cx, best.cy, best.r, dt);
+        } else if (yoloReady) {
+          const yoloBoxes = await yolo.detect(detectorCanvas).catch(() => []);
+          if (yoloBoxes.length > 0) {
+            let best = yoloBoxes[0];
+            for (const b of yoloBoxes) {
+              if (b.w * b.h > best.w * best.h) best = b;
+            }
+            const center = pointToCanvas(
+              best.x + best.w / 2,
+              best.y + best.h / 2,
+              t
+            );
+            const r = (Math.max(best.w, best.h) / 2) * t.scale;
+            comeCloser = smoothComeCloser(center.x, center.y, r, dt);
+          }
         }
       }
       if (!comeCloser) lastComeCloser = null;
@@ -882,14 +916,7 @@ async function main() {
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      const facesPx: Point[][] = mpResult.faceLandmarks.map((lm) =>
-        lm.map((p) => {
-          const det = landmarkToDet(p);
-          return pointToCanvas(det.x, det.y, t);
-        })
-      );
-
-      const faces = tracker.update(facesPx, dt);
+      const faces = tracker.update(validFaces, dt);
       system.step(dt);
 
       drawBackground(faces, t);

@@ -32,6 +32,30 @@ function faceCentroid(pts: Point[]): Point {
   return { x: cx / FACE_OVAL.length, y: cy / FACE_OVAL.length };
 }
 
+/** FACE_OVAL bbox in the same coordinate space as `pts`. `diag` is the bbox
+ *  diagonal — rotation-invariant, used to threshold face size. */
+export function faceBBox(pts: Point[]) {
+  let minX = Infinity,
+    maxX = -Infinity,
+    minY = Infinity,
+    maxY = -Infinity;
+  for (const i of FACE_OVAL) {
+    if (pts[i].x < minX) minX = pts[i].x;
+    if (pts[i].x > maxX) maxX = pts[i].x;
+    if (pts[i].y < minY) minY = pts[i].y;
+    if (pts[i].y > maxY) maxY = pts[i].y;
+  }
+  const w = maxX - minX;
+  const h = maxY - minY;
+  return {
+    cx: (minX + maxX) / 2,
+    cy: (minY + maxY) / 2,
+    w,
+    h,
+    diag: Math.hypot(w, h),
+  };
+}
+
 export class FaceTracker {
   /** Faces whose FACE_OVAL bbox width is smaller than this (in pixels) are
    *  ignored — too small to render eyes meaningfully. */
@@ -51,19 +75,7 @@ export class FaceTracker {
   update(detected: Point[][], dt: number): TrackedFace[] {
     const faces: Point[][] = [];
     for (const pts of detected) {
-      let minX = Infinity,
-        maxX = -Infinity,
-        minY = Infinity,
-        maxY = -Infinity;
-      for (const i of FACE_OVAL) {
-        if (pts[i].x < minX) minX = pts[i].x;
-        if (pts[i].x > maxX) maxX = pts[i].x;
-        if (pts[i].y < minY) minY = pts[i].y;
-        if (pts[i].y > maxY) maxY = pts[i].y;
-      }
-      // Use bbox diagonal so the threshold works regardless of rotation.
-      const diag = Math.hypot(maxX - minX, maxY - minY);
-      if (diag >= this.minFaceWidth) faces.push(pts);
+      if (faceBBox(pts).diag >= this.minFaceWidth) faces.push(pts);
     }
     const centroids = faces.map(faceCentroid);
 
